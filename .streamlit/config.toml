@@ -1,0 +1,6 @@
+[server]
+# 設定檔案上傳上限為 2048 MB (2 GB)，支援大容量長影片直接上傳由後端自動剝離音訊
+maxUploadSize = 2048
+
+# 設定 WebSocket 單次訊息容量上限為 2048 MB
+maxMessageSize = 2048

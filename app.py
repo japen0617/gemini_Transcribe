@@ -327,12 +327,15 @@ if start_btn:
         is_foreign = (ascii_count > cjk_count * 2) or (lang_choice in ["英文 (en-US)", "日文 (ja-JP)"])
 
         if auto_translate and is_foreign:
+            def _update_trans_status(cur, total):
+                status_box.info(f"步驟 7：偵測到非中文語音，正在以 {selected_llm_label} 執行反思式兩階段翻譯（進度：{cur}/{total} 句）...")
             status_box.info(f"步驟 7：偵測到非中文語音，正在以 {selected_llm_label} 執行反思式兩階段翻譯...")
             translated_subs, bilingual_subs, reflection_notes = reflective_translate_subtitles(
                 api_key=api_key,
                 subtitles=subtitles,
                 custom_vocabulary=custom_vocab,
-                model_name=selected_llm_model
+                model_name=selected_llm_model,
+                progress_callback=_update_trans_status
             )
 
         progress_bar.progress(100)
