@@ -89,7 +89,8 @@ def extract_words_from_interaction_response(
     api_response: Dict[str, Any],
     chunk_index: int,
     chunk_start_sec: float,
-    chunk_count: int
+    chunk_count: int,
+    enable_diarization: bool = True
 ) -> Tuple[List[Dict[str, Any]], str, bool]:
     """
     Extract word_info entries from Gemini transcribe response.
@@ -115,7 +116,7 @@ def extract_words_from_interaction_response(
                     if anno.get("type") == "word_info":
                         has_annotations = True
                         word_text = anno.get("text", "")
-                        speaker_raw = anno.get("speaker", "")
+                        speaker_raw = anno.get("speaker", "") if enable_diarization else ""
                         start_off = parse_offset(anno.get("start_offset", 0))
                         end_off = parse_offset(anno.get("end_offset", 0))
                         
@@ -127,23 +128,29 @@ def extract_words_from_interaction_response(
                             "chunk_index": chunk_index
                         })
 
-    # Order speakers in this chunk by order of appearance
+    # Order speakers in this chunk by order of appearance only if diarization is enabled
     speaker_order: Dict[str, int] = {}
-    for w in words:
-        spk = w["speaker_raw"]
-        if spk and spk not in speaker_order:
-            speaker_order[spk] = len(speaker_order) + 1
+    if enable_diarization:
+        for w in words:
+            spk = w.get("speaker_raw", "")
+            if spk and spk not in speaker_order:
+                speaker_order[spk] = len(speaker_order) + 1
 
-    # Assign speaker label with namespace if chunk_count > 1
+    has_speakers = bool(speaker_order) and enable_diarization
+
+    # Assign speaker label only when speaker actually exists and diarization is on
     for w in words:
-        spk = w["speaker_raw"]
-        order_num = speaker_order.get(spk, 1) if spk else 1
-        if chunk_count > 1:
-            w["speaker_label"] = f"第{chunk_index + 1}段-語者{order_num}"
+        spk = w.get("speaker_raw", "")
+        if has_speakers and spk:
+            order_num = speaker_order.get(spk, 1)
+            if chunk_count > 1:
+                w["speaker_label"] = f"第{chunk_index + 1}段-語者{order_num}"
+            else:
+                w["speaker_label"] = f"語者 {order_num}"
         else:
-            w["speaker_label"] = f"語者 {order_num}"
+            w["speaker_label"] = ""
 
-    return words, fallback_text.strip(), has_annotations
+    return words, fallback_text.strip(), has_speakers
 
 def group_words_into_subtitles(
     words: List[Dict[str, Any]],
@@ -176,8 +183,8 @@ def group_words_into_subtitles(
 
         if curr_words:
             prev_w = curr_words[-1]
-            # 1. Speaker changed
-            if w_speaker != curr_speaker:
+            # 1. Speaker changed (only break if both speakers are non-empty and differ)
+            if w_speaker and curr_speaker and w_speaker != curr_speaker:
                 should_break = True
             # 2. Pause gap exceeded
             elif (w_start - prev_w["end"]) > pause_threshold:
@@ -228,7 +235,8 @@ def generate_srt(subtitles: List[Dict[str, Any]]) -> str:
     for i, sub in enumerate(subtitles, 1):
         start_str = format_timestamp_srt(sub["start"])
         end_str = format_timestamp_srt(sub["end"])
-        speaker_tag = f"[{sub['speaker']}] " if sub.get("speaker") else ""
+        spk = sub.get("speaker", "").strip()
+        speaker_tag = f"[{spk}] " if spk else ""
         lines.append(str(i))
         lines.append(f"{start_str} --> {end_str}")
         lines.append(f"{speaker_tag}{sub['text']}")
@@ -241,7 +249,8 @@ def generate_vtt(subtitles: List[Dict[str, Any]]) -> str:
     for i, sub in enumerate(subtitles, 1):
         start_str = format_timestamp_vtt(sub["start"])
         end_str = format_timestamp_vtt(sub["end"])
-        speaker_tag = f"[{sub['speaker']}] " if sub.get("speaker") else ""
+        spk = sub.get("speaker", "").strip()
+        speaker_tag = f"[{spk}] " if spk else ""
         lines.append(str(i))
         lines.append(f"{start_str} --> {end_str}")
         lines.append(f"{speaker_tag}{sub['text']}")
@@ -254,8 +263,11 @@ def generate_txt(subtitles: List[Dict[str, Any]]) -> str:
     for sub in subtitles:
         start_str = format_timestamp_vtt(sub["start"]).split(".")[0]
         end_str = format_timestamp_vtt(sub["end"]).split(".")[0]
-        spk = sub.get("speaker", "語者")
-        lines.append(f"[{spk}] ({start_str} - {end_str})")
+        spk = sub.get("speaker", "").strip()
+        if spk:
+            lines.append(f"[{spk}] ({start_str} - {end_str})")
+        else:
+            lines.append(f"({start_str} - {end_str})")
         lines.append(f"{sub['text']}")
         lines.append("")
     return "\n".join(lines)

@@ -105,6 +105,50 @@ def test_srt_vtt_txt_generation():
     assert "[語者 1]" in txt
     assert "早安。" in txt
 
+def test_diarization_disabled():
+    fake_response = {
+        "steps": [
+            {
+                "type": "model_output",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "我們準備好了嗎？",
+                        "annotations": [
+                            {"type": "word_info", "text": "我", "speaker": "spk:0", "start_offset": "77.000s", "end_offset": "77.200s"},
+                            {"type": "word_info", "text": "們", "speaker": "spk:0", "start_offset": "77.200s", "end_offset": "77.300s"},
+                            {"type": "word_info", "text": "準備好了嗎？", "speaker": "spk:0", "start_offset": "77.300s", "end_offset": "77.700s"}
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+
+    # When diarization is disabled
+    words, fallback, has_diar = extract_words_from_interaction_response(
+        fake_response, chunk_index=0, chunk_start_sec=0.0, chunk_count=1, enable_diarization=False
+    )
+    assert has_diar is False
+    for w in words:
+        assert w["speaker_label"] == ""
+
+    subs = group_words_into_subtitles(words)
+    assert len(subs) == 1
+    assert subs[0]["speaker"] == ""
+    assert subs[0]["text"] == "我們準備好了嗎？"
+
+    srt = generate_srt(subs)
+    assert "[語者" not in srt
+    assert "00:01:17,000 --> 00:01:17,700\n我們準備好了嗎？" in srt
+
+    vtt = generate_vtt(subs)
+    assert "[語者" not in vtt
+
+    txt = generate_txt(subs)
+    assert "[語者" not in txt
+    assert "(00:01:17 - 00:01:17)" in txt
+
 def test_convert_subtitles_script():
     from transcript_formatter import convert_subtitles_script
     simplified_subs = [

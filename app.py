@@ -285,7 +285,8 @@ if start_btn:
                 response_data,
                 chunk_index=idx,
                 chunk_start_sec=chunk_info["start"],
-                chunk_count=chunk_count
+                chunk_count=chunk_count,
+                enable_diarization=enable_diarization
             )
             all_words.extend(chunk_words)
 
@@ -386,44 +387,49 @@ if st.session_state.transcription_results:
     m1.metric("總音訊時長", f"{total_dur/60:.2f} 分鐘")
     m2.metric("切分段數", f"{chunk_count} 段")
     m3.metric("總字幕句數", f"{len(subtitles)} 句")
-    distinct_speakers_count = len(set(s.get("speaker", "") for s in subtitles if s.get("speaker")))
-    m4.metric("識別語者數", f"{distinct_speakers_count} 位")
+    distinct_speakers_list = [s.get("speaker", "").strip() for s in subtitles if s.get("speaker", "").strip()]
+    distinct_speakers_count = len(set(distinct_speakers_list))
+    if distinct_speakers_count > 0:
+        m4.metric("識別語者數", f"{distinct_speakers_count} 位")
+    else:
+        m4.metric("語者分離", "未開啟")
 
-    # AI Speaker Reconcile & Name Inference Button
-    st.write("---")
-    r_col1, r_col2 = st.columns([2, 1])
-    with r_col1:
-        st.write("💡 **AI 跨段語者對齊與人名推斷**")
-        st.caption("依據對話線索（自我介紹、指名稱謂）統一跨段語者代號並標註真實姓名（若無直接依據則忠實保留代號）")
-    with r_col2:
-        if st.button("🤖 執行跨段對齊與人名推斷", use_container_width=True):
-            with st.spinner(f"{selected_llm_label} 正在分析對話語意與稱謂證據..."):
-                aligned_subs, rep = infer_and_align_speakers(
-                    api_key=api_key,
-                    subtitles=subtitles,
-                    user_notes=context_notes,
-                    model_name=selected_llm_model
-                )
+    # AI Speaker Reconcile & Name Inference Button (Only show if diarization is enabled & speakers exist)
+    if distinct_speakers_count > 0:
+        st.write("---")
+        r_col1, r_col2 = st.columns([2, 1])
+        with r_col1:
+            st.write("💡 **AI 跨段語者對齊與人名推斷**")
+            st.caption("依據對話線索（自我介紹、指名稱謂）統一跨段語者代號並標註真實姓名（若無直接依據則忠實保留代號）")
+        with r_col2:
+            if st.button("🤖 執行跨段對齊與人名推斷", use_container_width=True):
+                with st.spinner(f"{selected_llm_label} 正在分析對話語意與稱謂證據..."):
+                    aligned_subs, rep = infer_and_align_speakers(
+                        api_key=api_key,
+                        subtitles=subtitles,
+                        user_notes=context_notes,
+                        model_name=selected_llm_model
+                    )
 
-                if selected_script_mode != "none":
-                    aligned_subs = convert_subtitles_script(aligned_subs, mode=selected_script_mode)
+                    if selected_script_mode != "none":
+                        aligned_subs = convert_subtitles_script(aligned_subs, mode=selected_script_mode)
 
-                st.session_state.transcription_results["subtitles"] = aligned_subs
-                st.session_state.speaker_aligned = True
-                st.session_state.speaker_report = rep
-                st.rerun()
+                    st.session_state.transcription_results["subtitles"] = aligned_subs
+                    st.session_state.speaker_aligned = True
+                    st.session_state.speaker_report = rep
+                    st.rerun()
 
 
-    if st.session_state.speaker_report and "speakers" in st.session_state.speaker_report:
-        with st.expander("🔍 檢視 AI 語者推斷依據報告", expanded=True):
-            for spk in st.session_state.speaker_report["speakers"]:
-                label = spk.get("label")
-                name = spk.get("name")
-                evidence = spk.get("evidence")
-                if name:
-                    st.markdown(f"- **{name}** (`{label}`) — 依據：{evidence}")
-                else:
-                    st.markdown(f"- `{label}` — 對話中未發現直接姓名線索，保留代號")
+        if st.session_state.speaker_report and "speakers" in st.session_state.speaker_report:
+            with st.expander("🔍 檢視 AI 語者推斷依據報告", expanded=True):
+                for spk in st.session_state.speaker_report["speakers"]:
+                    label = spk.get("label")
+                    name = spk.get("name")
+                    evidence = spk.get("evidence")
+                    if name:
+                        st.markdown(f"- **{name}** (`{label}`) — 依據：{evidence}")
+                    else:
+                        st.markdown(f"- `{label}` — 對話中未發現直接姓名線索，保留代號")
 
     # AI Reflective Translation Action
     st.write("---")
@@ -473,13 +479,14 @@ if st.session_state.transcription_results:
     st.subheader("📝 字幕即時預覽")
     with st.container(height=380):
         for sub in active_subtitles:
-            spk_label = sub.get("speaker", "語者")
+            spk_label = sub.get("speaker", "").strip()
             start_fmt = f"{sub['start']:.1f}s"
             end_fmt = f"{sub['end']:.1f}s"
             rendered_text = sub["text"].replace("\n", "<br>")
+            spk_badge = f'<span class="speaker-badge">[{spk_label}]</span> ' if spk_label else ""
             st.markdown(
                 f'<span class="time-badge">[{start_fmt} - {end_fmt}]</span>'
-                f'<span class="speaker-badge">[{spk_label}]</span> '
+                f'{spk_badge}'
                 f'{rendered_text}',
                 unsafe_allow_html=True
             )
