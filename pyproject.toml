@@ -1,0 +1,20 @@
+[project]
+name = "speech-transcribe"
+version = "0.1.0"
+description = "Gemini 3.5 Transcribe 影音語音辨識與語者分離系統"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-genai>=2.22.0",
+    "imageio-ffmpeg>=0.6.0",
+    "opencc-python-reimplemented>=0.1.7",
+    "pydantic>=2.13.5",
+    "pytest>=9.1.1",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
+    "streamlit>=1.63.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+

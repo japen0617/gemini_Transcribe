@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables (Keep credentials safe)
+.env
+.env.local
+.env.*.local
+
+# Pytest & IDE
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# macOS System Files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Temporary Audio / Video Files
+*.wav
+*.mp3
+*.m4a
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+*.flac
+*.aac
+*.ogg
+temp/
+transcribe_*/
