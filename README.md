@@ -44,15 +44,20 @@
 6. **台灣繁體中文 (OpenCC s2twp) 自動轉換**：
    - 解決 Google 語音模型原生偏向輸出簡體字的問題。
    - 預設自動進行台灣用語與標準正體轉換（如「軟件」->「軟體」、「項目」->「專案」）。
-7. **AI 跨段語者統一與真名推斷**：
+7. **反思式字幕翻譯 (Reflective Translation)**：
+   - 整合 `/reflective-translation` Skill 之兩階段自審機制。
+   - 非中文音訊（英文、日文等）自動/手動翻譯為台灣正體中文，遵循 SRT 口語自然節奏與專有名詞保護規範。
+   - 產出「💡 翻譯反思與術語選擇筆記 (Reflection Notes)」，並支援**中文譯文**與**中外雙語對照字幕**即時預覽與下載。
+8. **AI 跨段語者統一與真名推斷**：
    - 由 Gemini 分析對話中的自我介紹（如「我是 Sarah」）或稱謂證據（如「Evan 你進度如何」）自動對齊跨段代號並標記真實姓名（如 `[Evan (語者 1)]`）；無確鑿證據則忠實保留代號，嚴防幻覺。
-8. **四大格式一鍵匯出**：
-   - **SRT**：標準影音播放器字幕。
+9. **四大格式一鍵匯出**：
+   - **SRT**：標準影音播放器字幕（支援純譯文或雙語）。
    - **VTT**：網頁 HTML5 `<video>` 播放字幕。
    - **TXT**：發言者標註之純文字會議逐字稿。
    - **JSON**：含字詞層級時間戳（`word_info`）之完整結構化數據。
-9. **隱私與安全**：
+10. **隱私與安全**：
    - 轉錄完成後立即刪除 Google Files API 雲端副本與本機暫存檔案。
+
 
 ---
 
@@ -195,12 +200,15 @@ gemini_Transcribe/
 ├── gemini_client.py            # Gemini Interactions API 與 Files API 客戶端
 ├── transcript_formatter.py     # 字詞時間戳解析、CJK 空格處理、OpenCC 轉換與字幕匯出
 ├── vocabulary_corrector.py     # 專有詞彙同音字校正與 AI 跨段語者真名推斷
+├── translator.py               # /reflective-translation 反思式翻譯與雙語字幕模組
 ├── pyproject.toml              # 專案依賴與 pytest 配置
 ├── .env.example                # 環境變數設定範本
 ├── .gitignore                  # Git 忽略設定
 └── tests/
     ├── test_audio_processor.py       # 切段演算法與音訊處理單元測試
-    └── test_transcript_formatter.py  # CJK 空格、斷句、字體轉換與字幕測試
+    ├── test_transcript_formatter.py  # CJK 空格、斷句、字體轉換與字幕測試
+    └── test_translator.py            # 反思式翻譯與雙語字幕單元測試
+
 ```
 
 ---

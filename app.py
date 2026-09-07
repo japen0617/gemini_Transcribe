@@ -27,6 +27,8 @@ from vocabulary_corrector import (
     correct_subtitles_with_vocabulary,
     infer_and_align_speakers
 )
+from translator import reflective_translate_subtitles
+
 
 # Load environment variables from .env
 load_dotenv()
@@ -132,8 +134,16 @@ with st.sidebar:
     selected_script_mode = script_mode_map[selected_script_label]
 
     st.divider()
+    st.subheader("🌐 反思式翻譯 (Reflective Translation)")
+    auto_translate = st.checkbox(
+        "若非正體中文則自動反思翻譯",
+        value=True,
+        help="依據 /reflective-translation 兩階段自審規範，自動將英文、日文等外語字幕翻譯為台灣繁體正體"
+    )
 
+    st.divider()
     st.subheader("專有詞彙與語者推斷模型")
+
     
     llm_models_map = {
         "Gemini 3.5 Flash Lite": "gemini-3.5-flash-lite",
@@ -306,8 +316,27 @@ if start_btn:
             status_box.info(f"轉換字幕字體：{selected_script_label}...")
             subtitles = convert_subtitles_script(subtitles, mode=selected_script_mode)
 
+        # Step 7: Reflective Translation if non-Chinese and enabled
+        translated_subs = None
+        bilingual_subs = None
+        reflection_notes = []
+
+        sample_text = " ".join([s.get("text", "") for s in subtitles[:6]])
+        cjk_count = sum(1 for c in sample_text if '\u4e00' <= c <= '\u9fff')
+        ascii_count = sum(1 for c in sample_text if c.isascii() and c.isalpha())
+        is_foreign = (ascii_count > cjk_count * 2) or (lang_choice in ["英文 (en-US)", "日文 (ja-JP)"])
+
+        if auto_translate and is_foreign:
+            status_box.info(f"步驟 7：偵測到非中文語音，正在以 {selected_llm_label} 執行反思式兩階段翻譯...")
+            translated_subs, bilingual_subs, reflection_notes = reflective_translate_subtitles(
+                api_key=api_key,
+                subtitles=subtitles,
+                custom_vocabulary=custom_vocab,
+                model_name=selected_llm_model
+            )
+
         progress_bar.progress(100)
-        status_box.success("🎉 轉錄與字幕產出完成！")
+        status_box.success("🎉 轉錄與字幕產出完成！" + ("（已完成反思翻譯）" if translated_subs else ""))
 
         # Cleanup cloud files immediately
         if cleanup_temp:
@@ -316,7 +345,11 @@ if start_btn:
 
         # Store in session state
         st.session_state.transcription_results = {
-            "subtitles": subtitles,
+            "subtitles": translated_subs if translated_subs else subtitles,
+            "raw_subtitles": subtitles,
+            "translated_subtitles": translated_subs,
+            "bilingual_subtitles": bilingual_subs,
+            "reflection_notes": reflection_notes,
             "total_duration": total_duration,
             "chunk_count": chunk_count,
             "filename": input_filename
@@ -324,6 +357,7 @@ if start_btn:
 
         st.session_state.speaker_aligned = False
         st.session_state.speaker_report = None
+
 
     except Exception as e:
         st.error(f"❌ 處理過程發生錯誤：{str(e)}")
@@ -388,17 +422,62 @@ if st.session_state.transcription_results:
                 else:
                     st.markdown(f"- `{label}` — 對話中未發現直接姓名線索，保留代號")
 
+    # AI Reflective Translation Action
+    st.write("---")
+    tr_col1, tr_col2 = st.columns([2, 1])
+    with tr_col1:
+        st.write("🌐 **反思式翻譯為正體中文 (Reflective Translation)**")
+        st.caption("依據 /reflective-translation 兩階段規範進行口語潤飾、術語保護與自審反思筆記")
+    with tr_col2:
+        if st.button("🌐 執行反思式翻譯", use_container_width=True):
+            with st.spinner(f"{selected_llm_label} 正在執行反思式翻譯與術語審查..."):
+                t_subs, b_subs, r_notes = reflective_translate_subtitles(
+                    api_key=api_key,
+                    subtitles=res.get("raw_subtitles", subtitles),
+                    custom_vocabulary=custom_vocab,
+                    model_name=selected_llm_model
+                )
+                st.session_state.transcription_results["translated_subtitles"] = t_subs
+                st.session_state.transcription_results["bilingual_subtitles"] = b_subs
+                st.session_state.transcription_results["reflection_notes"] = r_notes
+                st.session_state.transcription_results["subtitles"] = t_subs
+                st.rerun()
+
+    # Reflection Notes Expander
+    if res.get("reflection_notes"):
+        with st.expander("💡 檢視反思式翻譯與術語抉擇筆記 (Reflection Notes)", expanded=True):
+            for note in res["reflection_notes"]:
+                st.markdown(f"- {note}")
+
+    # Subtitle Display Mode Switcher
+    if res.get("translated_subtitles"):
+        sub_mode = st.radio(
+            "選擇字幕預覽與下載模式",
+            ["正體中文譯文", "雙語對照字幕 (繁體中文 + 原文)", "原始轉錄文字"],
+            index=0,
+            horizontal=True
+        )
+        if sub_mode == "正體中文譯文":
+            active_subtitles = res["translated_subtitles"]
+        elif sub_mode == "雙語對照字幕 (繁體中文 + 原文)":
+            active_subtitles = res["bilingual_subtitles"]
+        else:
+            active_subtitles = res.get("raw_subtitles", subtitles)
+    else:
+        active_subtitles = subtitles
+
     # Subtitle Preview
     st.subheader("📝 字幕即時預覽")
     with st.container(height=380):
-        for sub in subtitles:
+        for sub in active_subtitles:
             spk_label = sub.get("speaker", "語者")
             start_fmt = f"{sub['start']:.1f}s"
             end_fmt = f"{sub['end']:.1f}s"
+            rendered_text = sub["text"].replace("\n", "<br>")
             st.markdown(
                 f'<span class="time-badge">[{start_fmt} - {end_fmt}]</span>'
                 f'<span class="speaker-badge">[{spk_label}]</span> '
-                f'{sub["text"]}',
+                f'{rendered_text}',
                 unsafe_allow_html=True
             )
 
@@ -406,10 +485,11 @@ if st.session_state.transcription_results:
     st.subheader("📥 匯出字幕與逐字稿")
     base_stem = Path(res["filename"]).stem
     
-    srt_content = generate_srt(subtitles)
-    vtt_content = generate_vtt(subtitles)
-    txt_content = generate_txt(subtitles)
-    json_content = generate_json_export(subtitles, metadata={"filename": res["filename"], "duration": total_dur})
+    srt_content = generate_srt(active_subtitles)
+    vtt_content = generate_vtt(active_subtitles)
+    txt_content = generate_txt(active_subtitles)
+    json_content = generate_json_export(active_subtitles, metadata={"filename": res["filename"], "duration": total_dur})
+
 
     d1, d2, d3, d4 = st.columns(4)
     d1.download_button(
