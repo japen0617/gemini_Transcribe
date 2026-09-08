@@ -358,8 +358,11 @@ if start_btn:
         is_foreign = (ascii_count > cjk_count * 2) or (lang_choice in ["英文 (en-US)", "日文 (ja-JP)"])
 
         if auto_translate and is_foreign:
-            def _update_trans_status(cur, total):
-                status_box.info(f"步驟 7：偵測到非中文語音，正在以 {selected_llm_label} 執行反思式兩階段翻譯（進度：{cur}/{total} 句）...")
+            def _update_trans_status(cur, total, note=None):
+                if note:
+                    status_box.warning(note)
+                else:
+                    status_box.info(f"步驟 7：偵測到非中文語音，正在以 {selected_llm_label} 執行反思式兩階段翻譯（進度：{cur}/{total} 句）...")
             status_box.info(f"步驟 7：偵測到非中文語音，正在以 {selected_llm_label} 執行反思式兩階段翻譯...")
             translated_subs, bilingual_subs, reflection_notes = reflective_translate_subtitles(
                 api_key=api_key,
@@ -477,14 +480,23 @@ if st.session_state.transcription_results:
         )
     with tr_col2:
         if st.button("🌐 執行反思式翻譯", use_container_width=True):
+            status_holder = st.empty()
+            def _ui_trans_callback(cur, total, note=None):
+                if note:
+                    status_holder.warning(note)
+                else:
+                    status_holder.info(f"正在以 {selected_llm_label} 執行反思式兩階段翻譯（進度：{cur}/{total} 句）...")
+
             with st.spinner(f"{selected_llm_label} 正在執行反思式翻譯與術語審查..."):
                 t_subs, b_subs, r_notes = reflective_translate_subtitles(
                     api_key=api_key,
                     subtitles=res.get("raw_subtitles", subtitles),
                     custom_vocabulary=custom_vocab,
                     model_name=selected_llm_model,
-                    strict_line_matching=strict_line_mode
+                    strict_line_matching=strict_line_mode,
+                    progress_callback=_ui_trans_callback
                 )
+                status_holder.empty()
                 st.session_state.transcription_results["translated_subtitles"] = t_subs
                 st.session_state.transcription_results["bilingual_subtitles"] = b_subs
                 st.session_state.transcription_results["reflection_notes"] = r_notes
