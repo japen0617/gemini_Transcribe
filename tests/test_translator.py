@@ -298,3 +298,54 @@ def test_reflective_translate_dual_mode_and_bilingual_lock():
             assert "\n" in b["text"]
             assert b["original_text"] != ""
 
+
+def test_meet_extreme_switching_real_file():
+    import os
+    from transcript_formatter import parse_srt_content
+    from translator import merge_subtitles_to_sentences, split_translation_proportionally, reflow_translation_to_subtitles
+
+    srt_path = "001 - Meet Extreme Switching - Episode 1.srt"
+    if not os.path.exists(srt_path):
+        pytest.skip(f"Test file {srt_path} not found")
+
+    with open(srt_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    cues = parse_srt_content(content)
+    assert len(cues) == 657
+
+    # Test sentence merging
+    blocks = merge_subtitles_to_sentences(cues)
+    assert len(blocks) == 263
+
+    # Find the block containing original Cues 21..24 (indices 20..23)
+    target_block = next((b for b in blocks if 20 in b.cue_indices), None)
+    assert target_block is not None
+    assert target_block.cue_indices == [20, 21, 22, 23]
+    assert "pre-requisite" in target_block.full_text
+    assert target_block.start == 26.8
+    assert target_block.end == 34.9
+
+    # Test Mode 1 (Proportional split) on this real block
+    block_cues = [cues[i] for i in target_block.cue_indices]
+    sample_translation = "這門課程沒有先修要求，但它將作為專業認證課程的先修基礎。"
+    mode1_cues = split_translation_proportionally(block_cues, sample_translation)
+    assert len(mode1_cues) == 4
+    assert mode1_cues[0]["start"] == 26.8
+    assert mode1_cues[-1]["end"] == 34.9
+    assert "".join(c["text"] for c in mode1_cues) == sample_translation
+
+    # Test Mode 2 (Reflow) on this real block
+    mode2_cues = reflow_translation_to_subtitles(
+        start=target_block.start,
+        end=target_block.end,
+        speaker=target_block.speaker,
+        translated_text=sample_translation,
+        original_text=target_block.full_text
+    )
+    # The 28-char sentence reflows into 2 clean lines (20-25 chars)
+    assert len(mode2_cues) == 2
+    assert mode2_cues[0]["start"] == 26.8
+    assert mode2_cues[-1]["end"] == 34.9
+
+

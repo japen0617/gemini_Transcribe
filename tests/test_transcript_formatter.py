@@ -160,3 +160,25 @@ def test_convert_subtitles_script():
     assert tw_subs[0]["text"] == "早上好，今天我們開會。"
     assert tw_subs[1]["text"] == "這是新的軟體專案。"  # "软件项目" -> "軟體專案"
 
+
+def test_parse_srt_content():
+    from transcript_formatter import parse_srt_content
+    srt_text = """1
+00:00:01,000 --> 00:00:02,500
+[語者 1] 早安。
+
+2
+00:00:03,000 --> 00:00:04,500
+大家好！
+"""
+    cues = parse_srt_content(srt_text)
+    assert len(cues) == 2
+    assert cues[0]["start"] == 1.0 and cues[0]["end"] == 2.5
+    assert cues[0]["speaker"] == "語者 1"
+    assert cues[0]["text"] == "早安。"
+
+    assert cues[1]["start"] == 3.0 and cues[1]["end"] == 4.5
+    assert cues[1]["speaker"] == ""
+    assert cues[1]["text"] == "大家好！"
+
+

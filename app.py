@@ -21,7 +21,8 @@ from transcript_formatter import (
     generate_vtt,
     generate_txt,
     generate_json_export,
-    convert_subtitles_script
+    convert_subtitles_script,
+    parse_srt_content
 )
 
 from vocabulary_corrector import (
@@ -189,8 +190,8 @@ st.markdown('<div class="sub-title">支援長影音自動剝離與無零頭分�
 
 # Upload Area
 uploaded_file = st.file_uploader(
-    "選擇或拖曳影音檔案至此（支援 MP4, MOV, MKV, AVI, WEBM, WAV, MP3, M4A, FLAC, OGG）",
-    type=["mp4", "mov", "mkv", "avi", "webm", "wav", "mp3", "m4a", "aac", "flac", "ogg"]
+    "選擇或拖曳影音或字幕檔案至此（支援 MP4, MOV, MKV, AVI, WEBM, WAV, MP3, M4A, FLAC, OGG, SRT, VTT）",
+    type=["mp4", "mov", "mkv", "avi", "webm", "wav", "mp3", "m4a", "aac", "flac", "ogg", "srt", "vtt"]
 )
 
 col1, col2 = st.columns([1, 1])
@@ -218,14 +219,40 @@ if "speaker_aligned" not in st.session_state:
 if "speaker_report" not in st.session_state:
     st.session_state.speaker_report = None
 
-start_btn = st.button("🚀 開始音訊處理與語音轉錄", type="primary", use_container_width=True)
+is_srt_file = uploaded_file is not None and uploaded_file.name.lower().endswith((".srt", ".vtt"))
+btn_label = "📄 載入現有字幕檔案並準備翻譯" if is_srt_file else "🚀 開始音訊處理與語音轉錄"
+start_btn = st.button(btn_label, type="primary", use_container_width=True)
 
 if start_btn:
+    if not uploaded_file:
+        st.error("❌ 請先上傳影音或字幕檔案！")
+        st.stop()
+
+    if is_srt_file:
+        try:
+            content = uploaded_file.getvalue().decode("utf-8", errors="replace")
+            subtitles = parse_srt_content(content)
+            if not subtitles:
+                st.error("❌ 字幕檔案解析失敗，未找到有效的時間軸或字幕內容！")
+                st.stop()
+
+            st.session_state.transcription_results = {
+                "subtitles": subtitles,
+                "raw_subtitles": subtitles,
+                "total_duration": subtitles[-1]["end"] if subtitles else 0.0,
+                "chunk_count": 1,
+                "source_file": uploaded_file.name
+            }
+            st.session_state.speaker_aligned = True
+            st.session_state.speaker_report = None
+            st.success(f"✅ 成功載入字幕檔「{uploaded_file.name}」，共 {len(subtitles)} 條字幕！現在可在下方點擊「🌐 執行反思式翻譯」。")
+            st.rerun()
+        except Exception as e:
+            st.error(f"❌ 讀取字幕檔案發生錯誤：{e}")
+            st.stop()
+
     if not api_key:
         st.error("❌ 請先提供 Gemini API Key！")
-        st.stop()
-    if not uploaded_file:
-        st.error("❌ 請先上傳影音檔案！")
         st.stop()
 
     work_dir = tempfile.mkdtemp(prefix="transcribe_")

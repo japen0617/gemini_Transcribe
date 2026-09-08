@@ -1,3 +1,4 @@
+import re
 import unicodedata
 import json
 import logging
@@ -315,4 +316,38 @@ def convert_subtitles_script(subtitles: List[Dict[str, Any]], mode: str = "s2twp
     except Exception as e:
         logger.warning(f"OpenCC conversion ({mode}) failed: {e}")
         return subtitles
+
+
+def parse_srt_content(content: str) -> List[Dict[str, Any]]:
+    """
+    Parse standard SRT format string into a list of subtitle cue dicts.
+    Handles start, end, speaker tags [Speaker], and multi-line cue text.
+    """
+    blocks = [b.strip() for b in content.strip().split("\n\n") if b.strip()]
+    cues = []
+    for b in blocks:
+        lines = [l.strip() for l in b.splitlines() if l.strip()]
+        if len(lines) >= 3 and "-->" in lines[1]:
+            times = lines[1].split("-->")
+            def to_sec(t_str: str) -> float:
+                parts = t_str.strip().replace(",", ".").split(":")
+                return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+            start = to_sec(times[0])
+            end = to_sec(times[1])
+            raw_text = " ".join(lines[2:]).strip()
+            speaker = ""
+            m = re.match(r"^\[(.*?)\]\s*(.*)$", raw_text)
+            if m:
+                speaker = m.group(1).strip()
+                text = m.group(2).strip()
+            else:
+                text = raw_text
+            cues.append({
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "text": text,
+                "speaker": speaker
+            })
+    return cues
+
 
