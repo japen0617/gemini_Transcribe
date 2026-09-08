@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -22,37 +22,134 @@ class TranslationBatchResponse(BaseModel):
     reflection_notes: List[str]
 
 
-def parse_custom_vocabulary(vocab_list: Optional[List[str]]) -> Tuple[List[str], Dict[str, str], List[str]]:
+MAPPING_SEPARATOR_REGEX = re.compile(r"\s*(?:->|=>|→|：|:|=|翻譯成|翻成|譯為|譯成|對應為|對應至|轉換為|轉為)\s*")
+PRESERVATION_ACTION_REGEX = re.compile(r"\s*(?:保留原文|保留原名|保留英文|維持原文|不翻譯|保留)\s*")
+QUOTE_CHARS = "\"\'“”„’『』「」"
+
+
+def _clean_quotes(text: str) -> str:
+    """Strips outer quotes and punctuation from term."""
+    text = text.strip()
+    while text and (text[0] in QUOTE_CHARS or text[-1] in QUOTE_CHARS):
+        if text[0] in QUOTE_CHARS:
+            text = text[1:].strip()
+        elif text[-1] in QUOTE_CHARS:
+            text = text[:-1].strip()
+    return text.strip()
+
+
+def _extract_terms(text: str) -> List[str]:
     """
-    Parses custom vocabulary entries into three categories:
-    1. preserved_terms: Plain English terms/brands/models to strictly keep in original form (e.g. 'switch', 'AP', 'Extreme Switching')
-    2. mapping_terms: Mapped terms with target translations (e.g. 'network -> 網路', 'stacking: 堆疊')
+    Extracts individual terms from a string, handling quotes and commas cleanly.
+    E.g. '“Fabric” , “Wing” , “AP”' -> ['Fabric', 'Wing', 'AP']
+         '"license" "licensing"' -> ['license', 'licensing']
+         'switch, AP' -> ['switch', 'AP']
+    """
+    text = text.strip()
+    if not text:
+        return []
+    has_quotes = any(qc in text for qc in QUOTE_CHARS)
+    terms: List[str] = []
+    if has_quotes:
+        tokens = re.findall(r"[\"\'“”„’『』「」]([^\"\'“”„’『』「」]+)[\"\'“”„’『』「」]|([^,，\"\'“”„’『』「」]+)", text)
+        for q_token, u_token in tokens:
+            token = (q_token or u_token).strip()
+            if not token:
+                continue
+            for part in re.split(r"[,，]+", token):
+                p = _clean_quotes(part.strip())
+                if p and p not in terms:
+                    terms.append(p)
+    else:
+        for part in re.split(r"[,，]+", text):
+            p = _clean_quotes(part.strip())
+            if p and p not in terms:
+                terms.append(p)
+    return terms
+
+
+def parse_custom_vocabulary(vocab_input: Optional[Union[List[str], str]]) -> Tuple[List[str], Dict[str, str], List[str]]:
+    """
+    Parses custom vocabulary entries into three categories with full support for
+    both symbolic and natural language syntax:
+    1. preserved_terms: Plain English terms/brands/models to strictly keep in original form
+       (e.g. 'switch', 'AP', 'Extreme Switching', '“Fabric” 保留原文')
+    2. mapping_terms: Mapped terms with target translations
+       (e.g. 'network -> 網路', 'network 翻譯成網路', '"license" "licensing" 翻譯成授權')
     3. general_terms: Chinese terms or domain phrases for phonetic/contextual alignment
+       (e.g. '永豐金', '品牌名稱保留原文')
     """
     preserved_terms: List[str] = []
     mapping_terms: Dict[str, str] = {}
     general_terms: List[str] = []
 
-    if not vocab_list:
+    if not vocab_input:
         return preserved_terms, mapping_terms, general_terms
 
-    for item in vocab_list:
-        item = item.strip()
-        if not item:
+    if isinstance(vocab_input, str):
+        raw_lines = vocab_input.splitlines()
+    else:
+        raw_lines = []
+        for item in vocab_input:
+            raw_lines.extend(item.splitlines())
+
+    for raw_line in raw_lines:
+        line = raw_line.strip()
+        if not line:
             continue
 
-        # Check mapping pattern: "A -> B", "A => B", "A → B", "A : B", "A ： B", "A = B"
-        m = re.split(r"\s*(?:->|=>|→|:|：|=)\s*", item, maxsplit=1)
-        if len(m) == 2 and m[0] and m[1]:
-            src, tgt = m[0].strip(), m[1].strip()
-            mapping_terms[src] = tgt
-        else:
-            # Check if term has English / alphanumeric letters
-            has_ascii_alpha = any(c.isascii() and c.isalpha() for c in item)
+        # Check mapping pattern first (e.g. "A -> B" or "A 翻譯成 B")
+        m = MAPPING_SEPARATOR_REGEX.split(line, maxsplit=1)
+        if len(m) == 2 and m[0].strip() and m[1].strip():
+            src_part, tgt_part = m[0].strip(), m[1].strip()
+            target_clean = _clean_quotes(tgt_part.rstrip(",，;；。"))
+            src_terms = _extract_terms(src_part)
+            if not src_terms:
+                src_terms = [_clean_quotes(src_part)]
+            for s in src_terms:
+                if s:
+                    mapping_terms[s] = target_clean
+            continue
+
+        # Check preservation action (e.g. "“Fabric” , “Wing” 保留原文")
+        if PRESERVATION_ACTION_REGEX.search(line):
+            cleaned_line = PRESERVATION_ACTION_REGEX.sub("", line).strip().strip(",，;；。")
+            if not cleaned_line:
+                if line not in general_terms:
+                    general_terms.append(line)
+                continue
+            has_ascii_alpha = any(c.isascii() and c.isalpha() for c in cleaned_line)
+            if not has_ascii_alpha:
+                if line not in general_terms:
+                    general_terms.append(line)
+                continue
+            subterms = _extract_terms(cleaned_line)
+            for t in subterms:
+                if any(c.isascii() and c.isalpha() for c in t):
+                    if t not in preserved_terms:
+                        preserved_terms.append(t)
+                else:
+                    if t not in general_terms:
+                        general_terms.append(t)
+            continue
+
+        # General line (e.g. "switch, AP, Extreme Switching" or "永豐金")
+        subterms = _extract_terms(line)
+        for t in subterms:
+            t_clean = _clean_quotes(t).strip().strip(",，;；。")
+            if not t_clean:
+                continue
+            has_ascii_alpha = any(c.isascii() and c.isalpha() for c in t_clean)
             if has_ascii_alpha:
-                preserved_terms.append(item)
+                if t_clean not in preserved_terms:
+                    preserved_terms.append(t_clean)
             else:
-                general_terms.append(item)
+                if t_clean not in general_terms:
+                    general_terms.append(t_clean)
+
+    # Conflict resolution: terms with explicit translation mappings are strictly excluded from preserved_terms
+    mapping_keys_lower = {k.lower() for k in mapping_terms.keys()}
+    preserved_terms = [t for t in preserved_terms if t.lower() not in mapping_keys_lower]
 
     return preserved_terms, mapping_terms, general_terms
 

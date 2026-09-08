@@ -197,11 +197,11 @@ col1, col2 = st.columns([1, 1])
 with col1:
     vocab_text = st.text_area(
         "專有詞彙與術語清單（同時適用於轉錄校正與反思翻譯）",
-        placeholder="例如：\nswitch, AP, Extreme Switching\nnetwork -> 網路\nstacking -> 堆疊\nAnthropic, PyTorch, 永豐金",
-        help="保留原文：直接輸入英文詞彙（如 switch, AP），翻譯時將強制鎖定保留英文，絕不誤翻為中文。\n指定譯法：可輸入對照格式（如 network -> 網路），翻譯時將嚴格採用此譯名。",
+        placeholder="例如：\nswitch, AP, Extreme Switching\nnetwork -> 網路（或 network 翻譯成網路）\n“Fabric” , “Wing” 保留原文\nAnthropic, PyTorch, 永豐金",
+        help="保留原文：直接輸入英文詞彙（如 switch, AP）或加上「保留原文」，翻譯時將強制鎖定保留英文，絕不誤翻為中文。\n指定譯法：可輸入符號對照（network -> 網路）或自然語言（network 翻譯成網路），翻譯時將嚴格採用此譯名。",
         height=140
     )
-    custom_vocab = [v.strip() for v in re.split(r"[,，\n]+", vocab_text) if v.strip()]
+    custom_vocab = [v.strip() for v in vocab_text.splitlines() if v.strip()]
 
 with col2:
     context_notes = st.text_area(

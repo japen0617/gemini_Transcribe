@@ -28,16 +28,16 @@ def correct_subtitles_with_vocabulary(
     # Prepare compact input representation: [{"id": 0, "text": "..."}]
     compact_lines = [{"id": i, "text": sub["text"]} for i, sub in enumerate(subtitles)]
     
+    from translator import parse_custom_vocabulary
+    preserved_terms, mapping_terms, general_terms = parse_custom_vocabulary(custom_vocabulary)
+
     vocab_items = []
-    for item in custom_vocabulary:
-        item = item.strip()
-        if not item:
-            continue
-        m = re.split(r"\s*(?:->|=>|→|:|：|=)\s*", item, maxsplit=1)
-        if len(m) == 2 and m[0] and m[1]:
-            vocab_items.append(f"{m[0]} (標準詞: {m[1]})")
-        else:
-            vocab_items.append(item)
+    for src, tgt in mapping_terms.items():
+        vocab_items.append(f"{src} (標準詞: {tgt})")
+    for term in preserved_terms:
+        vocab_items.append(term)
+    for term in general_terms:
+        vocab_items.append(term)
     vocab_str = ", ".join(vocab_items)
 
     prompt = f"""你是一位專業的字幕校對專家。

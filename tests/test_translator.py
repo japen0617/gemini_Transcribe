@@ -26,6 +26,56 @@ def test_parse_custom_vocabulary():
     }
     assert general == ["永豐金", "大戶投"]
 
+def test_parse_custom_vocabulary_natural_language():
+    user_input = [
+        "品牌名稱保留原文",
+        "“extreme platform one” 保留原文",
+        "“XIQ , XIQ-SE” , 保留原文",
+        "“Fabric” , “Wing” , “AP” “access point” “switch” “wireless” \"Air Gap\" “uplink” “Downlink”保留原文",
+        "\"license\" \"licensing\" 翻譯成授權",
+        "realtime 翻譯成即時",
+        "redundant 翻譯成備援",
+        "network 翻譯成網路",
+        "Intelligence 翻譯成智慧",
+        # Test duplicates
+        "realtime 翻譯成即時",
+        "network 翻譯成網路"
+    ]
+    preserved, mapping, general = parse_custom_vocabulary(user_input)
+
+    expected_preserved = [
+        "extreme platform one", "XIQ", "XIQ-SE", "Fabric", "Wing", "AP",
+        "access point", "switch", "wireless", "Air Gap", "uplink", "Downlink"
+    ]
+    assert preserved == expected_preserved
+    assert mapping == {
+        "license": "授權",
+        "licensing": "授權",
+        "realtime": "即時",
+        "redundant": "備援",
+        "network": "網路",
+        "Intelligence": "智慧"
+    }
+    assert general == ["品牌名稱保留原文"]
+    # Ensure network is never in preserved list
+    assert "network" not in preserved
+
+def test_parse_custom_vocabulary_conflict_resolution():
+    """
+    If a term is both stated as preserved and given a translation mapping,
+    the translation mapping must take precedence and the term must be removed
+    from the preserved list to prevent LLM instruction conflicts.
+    """
+    vocab = [
+        "network",
+        "switch 保留原文",
+        "network 翻譯成網路"
+    ]
+    preserved, mapping, general = parse_custom_vocabulary(vocab)
+    assert "network" not in preserved
+    assert preserved == ["switch"]
+    assert mapping == {"network": "網路"}
+
 def test_reflective_translate_fallback_empty():
     trans, biling, notes = reflective_translate_subtitles(
         api_key="fake",
