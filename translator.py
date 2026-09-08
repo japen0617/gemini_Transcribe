@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Union
 from google import genai
@@ -10,7 +11,8 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 DEFAULT_TRANSLATION_MODEL = "gemini-3.5-flash-lite"
-BATCH_SIZE = 25  # 25 sentence blocks per batch to avoid token truncation and formatting errors
+BATCH_SIZE = 50  # 50 sentence blocks per batch (fits within 15 RPM for free tier & well within 64k token limit)
+DEFAULT_BATCH_DELAY = 2.0  # Proactive 2.0s delay between batches to stay safely within 15 RPM limits
 
 
 class TranslationItem(BaseModel):
@@ -214,6 +216,17 @@ def _safe_parse_translation_json(raw_text: str) -> Tuple[Dict[int, str], List[st
         return trans_map, clean_notes
 
 
+def _extract_retry_delay(error_str: str, default_delay: float = 22.0) -> float:
+    """Extract recommended retry delay in seconds from 429 quota error message."""
+    m = re.search(r"retry in (\d+(?:\.\d+)?)s", error_str, re.IGNORECASE)
+    if m:
+        return max(5.0, float(m.group(1)) + 1.5)
+    m = re.search(r"retryDelay[\'\"]?:\s*[\'\"]?(\d+)s?", error_str, re.IGNORECASE)
+    if m:
+        return max(5.0, float(m.group(1)) + 1.5)
+    return default_delay
+
+
 SENTENCE_END_REGEX = re.compile(r"(?:[.?!。？！][\"\'“”）)]?)\s*$")
 
 
@@ -293,6 +306,32 @@ def merge_subtitles_to_sentences(
     return blocks
 
 
+def _get_quote_spans(text: str) -> List[Tuple[int, int]]:
+    """Finds all quote/bracket spans in text to protect them from being torn across lines."""
+    spans: List[Tuple[int, int]] = []
+    pairs = [("「", "」"), ("《", "》"), ('"', '"'), ("'", "'"), ("“", "”"), ("(", ")"), ("（", "）")]
+    for open_ch, close_ch in pairs:
+        start = 0
+        while True:
+            o_pos = text.find(open_ch, start)
+            if o_pos == -1:
+                break
+            c_pos = text.find(close_ch, o_pos + 1)
+            if c_pos == -1:
+                break
+            spans.append((o_pos, c_pos))
+            start = c_pos + 1
+    return spans
+
+
+def _is_inside_quote(idx: int, spans: List[Tuple[int, int]]) -> bool:
+    """Checks if an index falls strictly inside an open quote/bracket span."""
+    for o, c in spans:
+        if o < idx <= c:
+            return True
+    return False
+
+
 def split_translation_proportionally(
     block_cues: List[Dict[str, Any]],
     translated_text: str
@@ -300,6 +339,12 @@ def split_translation_proportionally(
     """
     Mode 1: Splits a translated sentence block proportionally back across the original
     cues according to their respective durations. Preserves exact line count & timestamps.
+
+    Enhancements:
+    1. Zero-Empty Guarantee: Ensures every cue receives non-empty text (never starves trailing cues).
+    2. Sentence-End Exclusion: Intermediate cues NEVER snap to sentence-ending punctuation (。！？).
+    3. Clause Punctuation Priority: Strongly prefers splitting on commas, semicolons (，、；) to keep clauses natural.
+    4. Quote & Title Protection: Protects titles/quoted terms (「...」, 《...》, "...") from being cut in half.
     """
     if not block_cues:
         return []
@@ -314,30 +359,92 @@ def split_translation_proportionally(
     trans = translated_text.strip()
     total_chars = len(trans)
 
-    results = []
+    results: List[Dict[str, Any]] = []
     curr_char_idx = 0
     num_cues = len(block_cues)
+    quote_spans = _get_quote_spans(trans)
 
     for i, orig_cue in enumerate(block_cues):
         c = dict(orig_cue)
         c["original_text"] = orig_cue.get("text", "")
         if i == num_cues - 1:
             segment = trans[curr_char_idx:].strip()
+            # If for any reason segment is empty, borrow characters from previous cue
+            if not segment and results:
+                prev_text = results[-1]["text"]
+                if len(prev_text) > 4:
+                    borrow_split = max(1, len(prev_text) - 4)
+                    for bp in range(len(prev_text) - 1, max(0, len(prev_text) - 8), -1):
+                        if prev_text[bp] in "，、； ":
+                            borrow_split = bp + 1
+                            break
+                    segment = prev_text[borrow_split:].strip()
+                    results[-1]["text"] = prev_text[:borrow_split].strip()
+                    results[-1]["translated_text"] = results[-1]["text"]
         else:
+            remaining_cues = num_cues - 1 - i
+            if total_chars >= num_cues:
+                max_split = max(curr_char_idx + 1, total_chars - remaining_cues)
+            else:
+                max_split = min(total_chars, curr_char_idx + 1)
+
             cue_dur = max(0.1, orig_cue.get("end", 0.0) - orig_cue.get("start", 0.0))
             ratio = cue_dur / total_duration
             target_count = max(1, round(total_chars * ratio))
-            target_end = min(total_chars - (num_cues - 1 - i), curr_char_idx + target_count)
+            target_end = min(max_split, curr_char_idx + target_count)
 
-            # Snap to punctuation within a search window if available
-            search_start = max(curr_char_idx + 1, target_end - 3)
-            search_end = min(total_chars - (num_cues - 1 - i), target_end + 3)
             best_split = target_end
-            for p_idx in range(search_start, search_end + 1):
-                if p_idx < len(trans) and trans[p_idx] in "，、。； ":
-                    best_split = p_idx + 1
-                    break
+            best_score = float("inf")
 
+            search_start = max(curr_char_idx + 1, target_end - 10)
+            search_end = min(max_split, target_end + 10)
+
+            for p_idx in range(search_start, search_end + 1):
+                # 1. Comma / Semicolon / Pause punctuation (split AFTER p_idx)
+                if p_idx < len(trans) and trans[p_idx] in "，、；;":
+                    cand = p_idx + 1
+                    if curr_char_idx < cand <= max_split:
+                        dist = abs(cand - target_end)
+                        score = dist * 1.0 - 6.0
+                        if _is_inside_quote(cand, quote_spans):
+                            score += 12.0
+                        if score < best_score:
+                            best_score = score
+                            best_split = cand
+
+                # 2. Before Opening Quote / Bracket (split BEFORE p_idx)
+                if p_idx < len(trans) and trans[p_idx] in "「《\"“(":
+                    cand = p_idx
+                    if curr_char_idx < cand <= max_split:
+                        dist = abs(cand - target_end)
+                        score = dist * 1.0 - 5.0
+                        if score < best_score:
+                            best_score = score
+                            best_split = cand
+
+                # 3. Space between words
+                if p_idx < len(trans) and trans[p_idx] == " ":
+                    cand = p_idx + 1
+                    if curr_char_idx < cand <= max_split:
+                        dist = abs(cand - target_end)
+                        score = dist * 1.5
+                        if _is_inside_quote(cand, quote_spans):
+                            score += 15.0  # Heavily penalize breaking inside quoted entity
+                        if score < best_score:
+                            best_score = score
+                            best_split = cand
+
+            # Base target_end evaluation if candidate falls inside quote
+            if best_score == float("inf") or _is_inside_quote(best_split, quote_spans):
+                for o, cl in quote_spans:
+                    if o < target_end <= cl:
+                        if curr_char_idx < o <= max_split and abs(o - target_end) <= 8:
+                            best_split = o
+                        elif curr_char_idx < cl + 1 <= max_split and abs(cl + 1 - target_end) <= 8:
+                            best_split = cl + 1
+                        break
+
+            best_split = max(curr_char_idx + 1, min(max_split, best_split))
             segment = trans[curr_char_idx:best_split].strip()
             curr_char_idx = best_split
 
@@ -425,7 +532,8 @@ def reflective_translate_subtitles(
     model_name: str = DEFAULT_TRANSLATION_MODEL,
     target_language: str = "繁體中文（台灣標準正體）",
     strict_line_matching: bool = False,
-    progress_callback: Optional[Any] = None
+    progress_callback: Optional[Any] = None,
+    batch_delay: float = DEFAULT_BATCH_DELAY
 ) -> TranslationResult:
     """
     Perform Reflective Translation on subtitles using Sentence-Level Merging & Alignment:
@@ -474,14 +582,17 @@ def reflective_translate_subtitles(
     master_trans_map: Dict[int, str] = {}
     master_reflection_notes: List[str] = []
 
-    # Process in batches of BATCH_SIZE (25 complete sentences)
+    # Process in batches of BATCH_SIZE (50 complete sentences)
     for batch_start in range(0, total_blocks, BATCH_SIZE):
         batch_end = min(batch_start + BATCH_SIZE, total_blocks)
         batch_slice = sentence_blocks[batch_start:batch_end]
         compact_lines = [{"id": b.id, "text": b.full_text} for b in batch_slice]
 
         if progress_callback:
-            progress_callback(batch_start, total_blocks)
+            try:
+                progress_callback(batch_start, total_blocks)
+            except Exception:
+                pass
 
         prompt = f"""你是一位精通【反思式翻譯（Reflective Translation）】的專業影視與會議字幕編譯專家。
 請將下列【字幕原文完整句子】逐句翻譯為道地自然、口語流暢的【{target_language}】。
@@ -520,38 +631,74 @@ def reflective_translate_subtitles(
 {json.dumps(compact_lines, ensure_ascii=False, indent=2)}
 """
 
-        try:
-            # Use Pydantic response_schema for constrained decoding
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=TranslationBatchResponse
-            )
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=config
-            )
-            batch_map, batch_notes = _safe_parse_translation_json(response.text)
-            master_trans_map.update(batch_map)
-            for note in batch_notes:
-                if note not in master_reflection_notes:
-                    master_reflection_notes.append(note)
+        max_retries = 4
+        success = False
 
-        except Exception as e:
-            logger.warning(f"Batch {batch_start}-{batch_end} schema translation failed ({e}), trying fallback unconstrained call...")
+        for attempt in range(max_retries):
             try:
-                fallback_response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config={"response_mime_type": "application/json"}
-                )
-                batch_map, batch_notes = _safe_parse_translation_json(fallback_response.text)
+                # Use Pydantic response_schema for constrained decoding
+                try:
+                    config = types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=TranslationBatchResponse
+                    )
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=config
+                    )
+                    batch_map, batch_notes = _safe_parse_translation_json(response.text)
+                except Exception as schema_err:
+                    err_str = str(schema_err)
+                    if any(k in err_str for k in ["429", "RESOURCE_EXHAUSTED", "Quota exceeded", "quota"]):
+                        raise schema_err  # Re-raise so outer loop triggers smart 429 cooling
+
+                    logger.warning(f"Batch {batch_start}-{batch_end} schema translation failed ({schema_err}), trying fallback unconstrained call...")
+                    fallback_response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config={"response_mime_type": "application/json"}
+                    )
+                    batch_map, batch_notes = _safe_parse_translation_json(fallback_response.text)
+
                 master_trans_map.update(batch_map)
                 for note in batch_notes:
                     if note not in master_reflection_notes:
                         master_reflection_notes.append(note)
-            except Exception as e2:
-                logger.error(f"Fallback translation also failed for batch {batch_start}-{batch_end}: {e2}")
+                success = True
+                break
+
+            except Exception as e:
+                err_msg = str(e)
+                is_rate_limit = any(k in err_msg for k in ["429", "RESOURCE_EXHAUSTED", "Quota exceeded", "quota"])
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait_sec = _extract_retry_delay(err_msg, default_delay=22.0 * (attempt + 1))
+                    logger.warning(
+                        f"Batch {batch_start}-{batch_end} 遇到 429 頻率限制，自動冷卻等待 {wait_sec:.1f} 秒後重試 "
+                        f"（第 {attempt + 1}/{max_retries} 次）..."
+                    )
+                    if progress_callback:
+                        try:
+                            progress_callback(
+                                batch_start,
+                                total_blocks,
+                                f"⏳ 達到 API 頻率上限（15 RPM），正在自動冷卻等待 {int(wait_sec)} 秒後繼續翻譯..."
+                            )
+                        except TypeError:
+                            try:
+                                progress_callback(batch_start, total_blocks)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    time.sleep(wait_sec)
+                else:
+                    logger.error(f"Fallback translation also failed for batch {batch_start}-{batch_end}: {e}")
+                    break
+
+        # Proactive pacing between batches to stay safely within 15 RPM limits
+        if batch_end < total_blocks and success and batch_delay > 0:
+            time.sleep(batch_delay)
 
     # Step 2: Assign translations to SentenceBlocks
     for block in sentence_blocks:

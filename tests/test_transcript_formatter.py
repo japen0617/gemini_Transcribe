@@ -182,3 +182,49 @@ def test_parse_srt_content():
     assert cues[1]["text"] == "大家好！"
 
 
+def test_srt_upload_result_structure_and_export():
+    from transcript_formatter import parse_srt_content, generate_srt, generate_vtt, generate_txt, generate_json_export
+    from pathlib import Path
+    import json
+
+    filename = "001 - Meet Extreme Switching - Episode 1.srt"
+    srt_sample = """1
+00:00:00,100 --> 00:00:00,500
+Hi, everyone.
+
+2
+00:00:00,500 --> 00:00:01,200
+I'm Claire.
+"""
+    cues = parse_srt_content(srt_sample)
+    assert len(cues) == 2
+
+    # Simulate app session state dictionary
+    res = {
+        "subtitles": cues,
+        "raw_subtitles": cues,
+        "total_duration": cues[-1]["end"] if cues else 0.0,
+        "chunk_count": 1,
+        "filename": filename,
+        "source_file": filename
+    }
+
+    # Verify key accesses that app.py performs
+    base_filename = res.get("filename") or res.get("source_file") or "subtitles.srt"
+    base_stem = Path(base_filename).stem
+    assert base_stem == "001 - Meet Extreme Switching - Episode 1"
+
+    total_dur = res.get("total_duration", 0.0)
+    active_subtitles = res.get("subtitles", [])
+
+    srt_out = generate_srt(active_subtitles)
+    assert "Hi, everyone." in srt_out
+
+    json_out = generate_json_export(active_subtitles, metadata={"filename": base_filename, "duration": total_dur})
+    parsed_json = json.loads(json_out)
+    assert parsed_json["metadata"]["filename"] == filename
+    assert parsed_json["metadata"]["duration"] == 1.2
+    assert parsed_json["subtitle_count"] == 2
+
+
+

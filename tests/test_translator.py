@@ -145,14 +145,14 @@ def test_safe_parse_with_unescaped_quotes():
 
 def test_batching_translation():
     """
-    Tests that when sentence blocks > 25, translation executes in batches properly.
+    Tests that when sentence blocks > 50, translation executes in batches properly.
     """
     sample_subtitles = [
         {"speaker": "語者 1", "start": float(i), "end": float(i+1), "text": f"Line {i}."}
-        for i in range(45)
+        for i in range(75)
     ]
 
-    with patch("translator.genai.Client") as mock_client_cls:
+    with patch("translator.genai.Client") as mock_client_cls, patch("translator.time.sleep") as mock_sleep:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
 
@@ -171,12 +171,60 @@ def test_batching_translation():
         trans, biling, notes = reflective_translate_subtitles(
             api_key="fake_key",
             subtitles=sample_subtitles,
-            strict_line_matching=True
+            strict_line_matching=True,
+            batch_delay=0.1
         )
 
-        assert len(trans) == 45
-        assert len(biling) == 45
+        assert len(trans) == 75
+        assert len(biling) == 75
+        # 75 cues with BATCH_SIZE=50 => 2 batches
         assert mock_client.models.generate_content.call_count == 2
+        assert mock_sleep.called
+
+
+def test_reflective_translate_429_cooling_and_retry():
+    """
+    Tests that when a 429 RESOURCE_EXHAUSTED error occurs, the translator extracts
+    retry delay, sleeps to cool down, and retries successfully.
+    """
+    sample_subtitles = [
+        {"speaker": "語者 1", "start": 0.0, "end": 2.0, "text": "Hello world."}
+    ]
+
+    with patch("translator.genai.Client") as mock_client_cls, patch("translator.time.sleep") as mock_sleep:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+
+        call_count = 0
+        def mock_generate(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception("429 RESOURCE_EXHAUSTED. Please retry in 2.5s. limit: 15")
+            resp = MagicMock()
+            resp.text = """{
+              "translations": [
+                {"id": 0, "translated_text": "你好世界。"}
+              ],
+              "reflection_notes": ["術語保留"]
+            }"""
+            return resp
+
+        mock_client.models.generate_content.side_effect = mock_generate
+
+        trans, biling, notes = reflective_translate_subtitles(
+            api_key="fake_key",
+            subtitles=sample_subtitles,
+            strict_line_matching=True,
+            batch_delay=0.0
+        )
+
+        assert len(trans) == 1
+        assert trans[0]["text"] == "你好世界。"
+        assert call_count == 2
+        # Verify sleep was called with parsed delay (~2.5s + 1.5s buffer = 4.0s)
+        assert mock_sleep.called
+        assert mock_sleep.call_args[0][0] >= 4.0
 
 
 def test_merge_subtitles_to_sentences():
@@ -238,6 +286,35 @@ def test_split_translation_proportionally():
     # Check text reconstructed without loss
     reconstructed = "".join(r["text"] for r in split_res)
     assert reconstructed == trans_text
+
+
+def test_split_translation_zero_empty_and_quote_protection():
+    from translator import split_translation_proportionally
+
+    # Case 1: Short tail cue (0.3s) - must NEVER be empty, snaps to comma
+    cues_tail = [
+        {"start": 14.3, "end": 16.2, "text": "We make switches and we do them", "speaker": "語者 1"},
+        {"start": 16.2, "end": 16.5, "text": "well.", "speaker": "語者 1"}
+    ]
+    trans_tail = "我們製造 switch，而且我們做得很好。"
+    res_tail = split_translation_proportionally(cues_tail, trans_tail)
+    assert len(res_tail) == 2
+    assert res_tail[0]["text"] == "我們製造 switch，"
+    assert res_tail[1]["text"] == "而且我們做得很好。"
+    assert all(len(c["text"]) > 0 for c in res_tail)
+
+    # Case 2: Title in quotes - must NOT be cut in the middle of quotes
+    cues_quote = [
+        {"start": 3.6, "end": 5.3, "text": "We are back for the new welcome", "speaker": "語者 1"},
+        {"start": 5.3, "end": 7.5, "text": "series, Meet Extreme Switching.", "speaker": "語者 1"}
+    ]
+    trans_quote = "我們為全新的歡迎系列節目「Meet Extreme Switching」回來了。"
+    res_quote = split_translation_proportionally(cues_quote, trans_quote)
+    assert len(res_quote) == 2
+    assert res_quote[0]["text"] == "我們為全新的歡迎系列節目"
+    assert res_quote[1]["text"] == "「Meet Extreme Switching」回來了。"
+    assert not res_quote[0]["text"].endswith("「Meet")
+
 
 
 def test_reflow_translation_to_subtitles():
