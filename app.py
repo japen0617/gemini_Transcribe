@@ -439,6 +439,11 @@ if st.session_state.transcription_results:
     with tr_col1:
         st.write("🌐 **反思式翻譯為正體中文 (Reflective Translation)**")
         st.caption("依據 /reflective-translation 兩階段規範進行口語潤飾、術語保護與自審反思筆記")
+        strict_line_mode = st.checkbox(
+            "嚴格維持原字幕行數與時間戳（模式 1：依時長等比切分）",
+            value=False,
+            help="預設採用模式 2（影視級智慧重劃時間軸），將長句重新拆分為自然通順的 20~25 字字幕；勾選此項則強制 1:1 拆回原始各行字幕時間軸。"
+        )
     with tr_col2:
         if st.button("🌐 執行反思式翻譯", use_container_width=True):
             with st.spinner(f"{selected_llm_label} 正在執行反思式翻譯與術語審查..."):
@@ -446,11 +451,14 @@ if st.session_state.transcription_results:
                     api_key=api_key,
                     subtitles=res.get("raw_subtitles", subtitles),
                     custom_vocabulary=custom_vocab,
-                    model_name=selected_llm_model
+                    model_name=selected_llm_model,
+                    strict_line_matching=strict_line_mode
                 )
                 st.session_state.transcription_results["translated_subtitles"] = t_subs
                 st.session_state.transcription_results["bilingual_subtitles"] = b_subs
                 st.session_state.transcription_results["reflection_notes"] = r_notes
+                st.session_state.transcription_results["mode1_subtitles"] = getattr(t_subs, "mode1", t_subs)
+                st.session_state.transcription_results["mode2_subtitles"] = getattr(t_subs, "mode2", t_subs)
                 st.session_state.transcription_results["subtitles"] = t_subs
                 st.rerun()
 
@@ -469,9 +477,15 @@ if st.session_state.transcription_results:
             horizontal=True
         )
         if sub_mode == "正體中文譯文":
-            active_subtitles = res["translated_subtitles"]
+            if strict_line_mode and "mode1_subtitles" in res:
+                active_subtitles = res["mode1_subtitles"]
+            elif not strict_line_mode and "mode2_subtitles" in res:
+                active_subtitles = res["mode2_subtitles"]
+            else:
+                active_subtitles = res["translated_subtitles"]
         elif sub_mode == "雙語對照字幕 (繁體中文 + 原文)":
             active_subtitles = res["bilingual_subtitles"]
+            st.info("💡 雙語對照模式已自動啟用模式 1（1:1 行數與時間戳精確對齊）")
         else:
             active_subtitles = res.get("raw_subtitles", subtitles)
     else:

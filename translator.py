@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from dataclasses import dataclass
 from typing import List, Dict, Any, Optional, Tuple, Union
 from google import genai
 from google.genai import types
@@ -9,7 +10,7 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 DEFAULT_TRANSLATION_MODEL = "gemini-3.5-flash-lite"
-BATCH_SIZE = 40  # 40 subtitle lines per batch to avoid token truncation and formatting errors
+BATCH_SIZE = 25  # 25 sentence blocks per batch to avoid token truncation and formatting errors
 
 
 class TranslationItem(BaseModel):
@@ -20,6 +21,32 @@ class TranslationItem(BaseModel):
 class TranslationBatchResponse(BaseModel):
     translations: List[TranslationItem]
     reflection_notes: List[str]
+
+
+@dataclass
+class SentenceBlock:
+    id: int
+    cue_indices: List[int]
+    speaker: str
+    full_text: str
+    start: float
+    end: float
+    translated_text: str = ""
+
+
+class TranslationResult(tuple):
+    """
+    Tuple subclass (translated, bilingual, notes) for 100% backward compatibility,
+    with .mode1 and .mode2 attributes for instant UI mode switching.
+    """
+    def __new__(cls, translated, bilingual, notes, mode1=None, mode2=None):
+        instance = super().__new__(cls, (translated, bilingual, notes))
+        instance.translated = translated
+        instance.bilingual = bilingual
+        instance.notes = notes
+        instance.mode1 = mode1 if mode1 is not None else translated
+        instance.mode2 = mode2 if mode2 is not None else translated
+        return instance
 
 
 MAPPING_SEPARATOR_REGEX = re.compile(r"\s*(?:->|=>|→|：|:|=|翻譯成|翻成|譯為|譯成|對應為|對應至|轉換為|轉為)\s*")
@@ -187,33 +214,240 @@ def _safe_parse_translation_json(raw_text: str) -> Tuple[Dict[int, str], List[st
         return trans_map, clean_notes
 
 
+SENTENCE_END_REGEX = re.compile(r"(?:[.?!。？！][\"\'“”）)]?)\s*$")
+
+
+def merge_subtitles_to_sentences(
+    subtitles: List[Dict[str, Any]],
+    max_gap_sec: float = 0.8,
+    max_duration_sec: float = 15.0,
+    max_words: int = 50
+) -> List[SentenceBlock]:
+    """
+    Merges broken subtitle cues into complete, grammatically sound sentence blocks.
+    Boundary conditions:
+    1. Speaker change
+    2. Sentence-ending punctuation (.?! or 。？！)
+    3. Gap between cues > max_gap_sec
+    4. Safety limit: block duration >= max_duration_sec or word count >= max_words
+    """
+    blocks: List[SentenceBlock] = []
+    if not subtitles:
+        return blocks
+
+    current_cues: List[Tuple[int, Dict[str, Any]]] = []
+    block_id = 0
+
+    for i, sub in enumerate(subtitles):
+        current_cues.append((i, sub))
+        text = sub.get("text", "").strip()
+        speaker = sub.get("speaker", "")
+
+        is_end_punct = bool(SENTENCE_END_REGEX.search(text))
+
+        is_gap_break = False
+        is_speaker_break = False
+        if i + 1 < len(subtitles):
+            next_sub = subtitles[i + 1]
+            gap = next_sub.get("start", 0.0) - sub.get("end", 0.0)
+            if gap > max_gap_sec:
+                is_gap_break = True
+            if next_sub.get("speaker", "") != speaker:
+                is_speaker_break = True
+        else:
+            is_gap_break = True
+
+        block_start = current_cues[0][1].get("start", 0.0)
+        block_end = current_cues[-1][1].get("end", 0.0)
+        duration = block_end - block_start
+        merged_raw_text = " ".join(c[1].get("text", "").strip() for c in current_cues)
+        word_count = len(merged_raw_text.split())
+
+        is_limit_reached = (duration >= max_duration_sec) or (word_count >= max_words)
+
+        if is_end_punct or is_gap_break or is_speaker_break or is_limit_reached:
+            cue_indices = [c[0] for c in current_cues]
+            blocks.append(SentenceBlock(
+                id=block_id,
+                cue_indices=cue_indices,
+                speaker=speaker,
+                full_text=merged_raw_text,
+                start=block_start,
+                end=block_end
+            ))
+            block_id += 1
+            current_cues = []
+
+    if current_cues:
+        cue_indices = [c[0] for c in current_cues]
+        merged_raw_text = " ".join(c[1].get("text", "").strip() for c in current_cues)
+        blocks.append(SentenceBlock(
+            id=block_id,
+            cue_indices=cue_indices,
+            speaker=current_cues[0][1].get("speaker", ""),
+            full_text=merged_raw_text,
+            start=current_cues[0][1].get("start", 0.0),
+            end=current_cues[-1][1].get("end", 0.0)
+        ))
+
+    return blocks
+
+
+def split_translation_proportionally(
+    block_cues: List[Dict[str, Any]],
+    translated_text: str
+) -> List[Dict[str, Any]]:
+    """
+    Mode 1: Splits a translated sentence block proportionally back across the original
+    cues according to their respective durations. Preserves exact line count & timestamps.
+    """
+    if not block_cues:
+        return []
+    if len(block_cues) == 1:
+        c = dict(block_cues[0])
+        c["text"] = translated_text
+        c["translated_text"] = translated_text
+        c["original_text"] = block_cues[0].get("text", "")
+        return [c]
+
+    total_duration = sum(max(0.1, c.get("end", 0.0) - c.get("start", 0.0)) for c in block_cues)
+    trans = translated_text.strip()
+    total_chars = len(trans)
+
+    results = []
+    curr_char_idx = 0
+    num_cues = len(block_cues)
+
+    for i, orig_cue in enumerate(block_cues):
+        c = dict(orig_cue)
+        c["original_text"] = orig_cue.get("text", "")
+        if i == num_cues - 1:
+            segment = trans[curr_char_idx:].strip()
+        else:
+            cue_dur = max(0.1, orig_cue.get("end", 0.0) - orig_cue.get("start", 0.0))
+            ratio = cue_dur / total_duration
+            target_count = max(1, round(total_chars * ratio))
+            target_end = min(total_chars - (num_cues - 1 - i), curr_char_idx + target_count)
+
+            # Snap to punctuation within a search window if available
+            search_start = max(curr_char_idx + 1, target_end - 3)
+            search_end = min(total_chars - (num_cues - 1 - i), target_end + 3)
+            best_split = target_end
+            for p_idx in range(search_start, search_end + 1):
+                if p_idx < len(trans) and trans[p_idx] in "，、。； ":
+                    best_split = p_idx + 1
+                    break
+
+            segment = trans[curr_char_idx:best_split].strip()
+            curr_char_idx = best_split
+
+        c["text"] = segment
+        c["translated_text"] = segment
+        results.append(c)
+
+    return results
+
+
+def reflow_translation_to_subtitles(
+    start: float,
+    end: float,
+    speaker: str,
+    translated_text: str,
+    original_text: str,
+    max_chars: int = 25
+) -> List[Dict[str, Any]]:
+    """
+    Mode 2: Reflows a translated sentence block into aesthetically pleasing subtitle lines
+    (typically 20~25 chars) with smooth, proportionally recalculated timestamps.
+    """
+    trans = translated_text.strip()
+    if not trans:
+        return []
+
+    duration = max(0.2, end - start)
+    total_chars = len(trans)
+
+    if total_chars <= max_chars:
+        return [{
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "speaker": speaker,
+            "text": trans,
+            "translated_text": trans,
+            "original_text": original_text
+        }]
+
+    # Split into 2 or more segments
+    k_segments = max(2, (total_chars + max_chars - 1) // max_chars)
+    target_seg_len = total_chars / k_segments
+
+    split_indices = [0]
+    for seg_i in range(1, k_segments):
+        ideal_pos = int(round(seg_i * target_seg_len))
+        # Search for punctuation nearby
+        search_start = max(split_indices[-1] + 5, ideal_pos - 6)
+        search_end = min(total_chars - 5, ideal_pos + 6)
+        best_pos = ideal_pos
+        for p_idx in range(search_start, search_end + 1):
+            if p_idx < total_chars and trans[p_idx] in "，、。； ":
+                best_pos = p_idx + 1
+                break
+        split_indices.append(best_pos)
+    split_indices.append(total_chars)
+
+    results = []
+    for s_i in range(len(split_indices) - 1):
+        p_start = split_indices[s_i]
+        p_end = split_indices[s_i + 1]
+        seg_text = trans[p_start:p_end].strip()
+        if not seg_text:
+            continue
+        seg_ratio_start = p_start / total_chars
+        seg_ratio_end = p_end / total_chars
+        seg_start = round(start + duration * seg_ratio_start, 2)
+        seg_end = round(start + duration * seg_ratio_end, 2)
+        results.append({
+            "start": seg_start,
+            "end": seg_end,
+            "speaker": speaker,
+            "text": seg_text,
+            "translated_text": seg_text,
+            "original_text": original_text
+        })
+
+    return results
+
+
 def reflective_translate_subtitles(
     api_key: str,
     subtitles: List[Dict[str, Any]],
     custom_vocabulary: Optional[List[str]] = None,
     model_name: str = DEFAULT_TRANSLATION_MODEL,
     target_language: str = "繁體中文（台灣標準正體）",
+    strict_line_matching: bool = False,
     progress_callback: Optional[Any] = None
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[str]]:
+) -> TranslationResult:
     """
-    Perform Reflective Translation on subtitles following the /reflective-translation skill:
-    1. Draft translation faithfully into target language with SRT spoken-rhythm guidelines.
-    2. Self-review against checklist:
-       - Term preservation (brand names, product names, abbreviations remain in original English).
-       - Spoken naturalness: avoid mechanical sentence structures, maintain readability (<30 chars per line).
-       - Revise translation.
-    3. Generate reflection notes explaining key terminology choices or ambiguous nuances.
-
-    Features batching (40 items/batch), Pydantic constrained schema, and regex fallback
-    to prevent JSON parsing errors on long transcripts or unescaped quotes.
+    Perform Reflective Translation on subtitles using Sentence-Level Merging & Alignment:
+    1. Merge fragmented cues into full SentenceBlocks (eliminating relative-clause cascading desync).
+    2. Draft translation faithfully on sentence level with SRT natural flow guidelines.
+    3. Self-review against checklist (term preservation, spoken naturalness).
+    4. Provide two output modes:
+       - Mode 1: Proportional split to original cues (exact line count & timestamps).
+       - Mode 2: Natural reflow to 20-25 char subtitles (smooth cinematic timestamps, default).
+       - Bilingual: automatically locked to Mode 1 for 1:1 perfect alignment!
 
     Returns:
-    - translated_subtitles: subtitles with translated_text
-    - bilingual_subtitles: subtitles with both translated_text and original_text
-    - reflection_notes: list of reflection bullet points
+    - TranslationResult tuple (active_subtitles, bilingual_subtitles, reflection_notes)
+      with .mode1 and .mode2 attributes.
     """
     if not subtitles:
-        return [], [], []
+        return TranslationResult([], [], [])
+
+    # Step 1: Sentence merging
+    sentence_blocks = merge_subtitles_to_sentences(subtitles)
+    if not sentence_blocks:
+        return TranslationResult([], [], [])
 
     client = genai.Client(api_key=api_key)
 
@@ -236,36 +470,36 @@ def reflective_translate_subtitles(
     else:
         vocab_instruction = "無使用者指定專有詞彙（請遵循一般科技產業與會議之慣用專有名詞規範）。"
 
-    total_subtitles = len(subtitles)
+    total_blocks = len(sentence_blocks)
     master_trans_map: Dict[int, str] = {}
     master_reflection_notes: List[str] = []
 
-    # Process in batches of BATCH_SIZE
-    for batch_start in range(0, total_subtitles, BATCH_SIZE):
-        batch_end = min(batch_start + BATCH_SIZE, total_subtitles)
-        batch_slice = subtitles[batch_start:batch_end]
-        compact_lines = [{"id": batch_start + i, "text": sub["text"]} for i, sub in enumerate(batch_slice)]
+    # Process in batches of BATCH_SIZE (25 complete sentences)
+    for batch_start in range(0, total_blocks, BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, total_blocks)
+        batch_slice = sentence_blocks[batch_start:batch_end]
+        compact_lines = [{"id": b.id, "text": b.full_text} for b in batch_slice]
 
         if progress_callback:
-            progress_callback(batch_start, total_subtitles)
+            progress_callback(batch_start, total_blocks)
 
         prompt = f"""你是一位精通【反思式翻譯（Reflective Translation）】的專業影視與會議字幕編譯專家。
-請將下列【字幕原文】逐句翻譯為道地自然、口語流暢的【{target_language}】。
+請將下列【字幕原文完整句子】逐句翻譯為道地自然、口語流暢的【{target_language}】。
 
 【專有詞彙與術語清單（最高優先級約束，不可違背）】：
 {vocab_instruction}
 
 【翻譯與兩階段反思規範】（嚴格遵循 reflective-translation 標準）：
 1. 兩階段處理（內部草稿與自審修潤）：
-   - 初譯：忠實傳達語意。
+   - 初譯：忠實傳達完整句子語意，避免機械直譯。
    - 自審修潤：必須嚴格執行「術語與品牌檢核清單（Term Preservation Checklist）」。檢查譯文是否不慎將保護清單中的英文詞彙翻成了中文？（例如：若清單要求保留 switch 或 Extreme Switching，草稿若誤翻為「交換器」或「極致交換器」，終稿必須強制還原回英文原文！）
 2. 術語保護與品牌規範（Term Preservation - 最高優先級）：
    - 【絕對禁止直譯品牌與產品線】：嚴禁將公司名稱、品牌名稱、產品型號拆解為普通形容詞進行字面直譯（例如：Extreme 是網通品牌名稱，絕不可譯為「極致」；Apple 是品牌名稱，絕不可譯為「蘋果」）。
    - 【保護清單詞彙絕對維持原文】：凡上述【最高優先級術語保護清單】中的詞彙（如 switch, AP, Extreme Switching 等），在譯文中一律保持原始英文與大小寫，絕不可自作主張翻譯為中文（不可翻為「交換器」或「存取點」等）。
    - 【指定對照強制落實】：凡上述【指定術語對照清單】中的詞彙，必須嚴格採用指定之譯名（例如 network 必須譯為「網路」）。
    - 【通用技術縮寫保護】：常見技術名詞與專用縮寫（如 Google, Anthropic, PyTorch, Docker, API, UI, AI, CLI, SDK 等）亦一律保留原始英文與大小寫。
-3. 字幕（SRT）特性約束：
-   - 追求自然口語節奏與螢幕可讀性，每行字數宜在 25~30 字以內，避免難以在螢幕上快速掃讀的冗長子句。
+3. 語意完整度約束：
+   - 每一筆資料為完整語意句，請輸出對應之完整正體中文翻譯，切勿遺漏句尾內容或過度省略。
 4. 標點引號防護：
    - 中文對話引述請使用『』或「」，避免在 translated_text 中使用未轉義的雙引號 `"`。
 5. 反思紀錄（Reflection）：
@@ -274,7 +508,7 @@ def reflective_translate_subtitles(
 【請以 JSON 格式嚴格回傳】：
 {{
   "translations": [
-    {{"id": {batch_start}, "translated_text": "正體中文譯文"}}
+    {{"id": {batch_start}, "translated_text": "完整句子之正體中文譯文"}}
   ],
   "reflection_notes": [
     "術語保護：依據專有詞彙清單，嚴格保留 switch 與 Extreme Switching 等品牌與專有名詞原文",
@@ -282,7 +516,7 @@ def reflective_translate_subtitles(
   ]
 }}
 
-【字幕原文批次】：
+【字幕原文完整句子批次】：
 {json.dumps(compact_lines, ensure_ascii=False, indent=2)}
 """
 
@@ -319,26 +553,45 @@ def reflective_translate_subtitles(
             except Exception as e2:
                 logger.error(f"Fallback translation also failed for batch {batch_start}-{batch_end}: {e2}")
 
-    # Build final subtitle lists
-    translated_subtitles = []
-    bilingual_subtitles = []
+    # Step 2: Assign translations to SentenceBlocks
+    for block in sentence_blocks:
+        block.translated_text = master_trans_map.get(block.id, block.full_text)
 
-    for i, sub in enumerate(subtitles):
-        original_text = sub.get("text", "")
-        trans_text = master_trans_map.get(i, original_text)
+    # Step 3: Build Mode 1 Subtitles (Proportional splitting to original cues)
+    mode1_subtitles: List[Dict[str, Any]] = []
+    for block in sentence_blocks:
+        block_cues = [subtitles[idx] for idx in block.cue_indices if idx < len(subtitles)]
+        split_cues = split_translation_proportionally(block_cues, block.translated_text)
+        mode1_subtitles.extend(split_cues)
 
-        # Subtitle with only translation
-        sub_trans = dict(sub)
-        sub_trans["text"] = trans_text
-        sub_trans["original_text"] = original_text
-        translated_subtitles.append(sub_trans)
+    # Step 4: Build Bilingual Subtitles (strictly locked to Mode 1 for 1:1 sync)
+    bilingual_subtitles: List[Dict[str, Any]] = []
+    for cue in mode1_subtitles:
+        b_cue = dict(cue)
+        t_text = cue.get("translated_text", "")
+        o_text = cue.get("original_text", "")
+        b_cue["text"] = f"{t_text}\n{o_text}"
+        b_cue["translated_text"] = t_text
+        b_cue["original_text"] = o_text
+        bilingual_subtitles.append(b_cue)
 
-        # Subtitle with bilingual display (Translated on top, Original on bottom)
-        sub_bilingual = dict(sub)
-        sub_bilingual["text"] = f"{trans_text}\n{original_text}"
-        sub_bilingual["translated_text"] = trans_text
-        sub_bilingual["original_text"] = original_text
-        bilingual_subtitles.append(sub_bilingual)
+    # Step 5: Build Mode 2 Subtitles (Natural reflow to 20-25 char lines with smooth timestamps)
+    mode2_subtitles: List[Dict[str, Any]] = []
+    for block in sentence_blocks:
+        reflow_cues = reflow_translation_to_subtitles(
+            start=block.start,
+            end=block.end,
+            speaker=block.speaker,
+            translated_text=block.translated_text,
+            original_text=block.full_text
+        )
+        mode2_subtitles.extend(reflow_cues)
+
+    # Active translated subtitles according to user preference
+    if strict_line_matching:
+        active_subtitles = mode1_subtitles
+    else:
+        active_subtitles = mode2_subtitles
 
     # Ensure reflection notes exist
     if not master_reflection_notes:
@@ -347,4 +600,10 @@ def reflective_translate_subtitles(
             "口語潤飾：依照台灣繁體自然對話節奏調整字幕長度與標點。"
         ]
 
-    return translated_subtitles, bilingual_subtitles, master_reflection_notes
+    return TranslationResult(
+        active_subtitles,
+        bilingual_subtitles,
+        master_reflection_notes,
+        mode1=mode1_subtitles,
+        mode2=mode2_subtitles
+    )
