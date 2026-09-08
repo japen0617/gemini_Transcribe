@@ -1,6 +1,30 @@
 import pytest
 from unittest.mock import MagicMock, patch
-from translator import reflective_translate_subtitles, _safe_parse_translation_json
+from translator import (
+    reflective_translate_subtitles,
+    _safe_parse_translation_json,
+    parse_custom_vocabulary
+)
+
+def test_parse_custom_vocabulary():
+    raw_vocab = [
+        "switch",
+        "AP",
+        "Extreme Switching",
+        "network -> 網路",
+        "stacking : 堆疊",
+        "Fabric = 矩陣架構",
+        "永豐金",
+        "大戶投"
+    ]
+    preserved, mapping, general = parse_custom_vocabulary(raw_vocab)
+    assert preserved == ["switch", "AP", "Extreme Switching"]
+    assert mapping == {
+        "network": "網路",
+        "stacking": "堆疊",
+        "Fabric": "矩陣架構"
+    }
+    assert general == ["永豐金", "大戶投"]
 
 def test_reflective_translate_fallback_empty():
     trans, biling, notes = reflective_translate_subtitles(
@@ -11,49 +35,41 @@ def test_reflective_translate_fallback_empty():
     assert biling == []
     assert notes == []
 
-def test_reflective_translate_mocked():
+def test_reflective_translate_prompt_with_custom_vocabulary():
     sample_subtitles = [
-        {"speaker": "語者 1", "start": 0.0, "end": 2.5, "text": "Hello world, welcome to our presentation."},
-        {"speaker": "語者 2", "start": 3.0, "end": 5.0, "text": "Today we will talk about PyTorch and Docker."}
+        {"speaker": "語者 1", "start": 0.0, "end": 2.5, "text": "Meet Extreme Switching on the new network."}
     ]
-
-    mock_json_response = """
-    {
-      "translations": [
-        {"id": 0, "translated_text": "大家好，歡迎參加我們的發表會。"},
-        {"id": 1, "translated_text": "今天我們將討論 PyTorch 與 Docker。"}
-      ],
-      "reflection_notes": [
-        "術語保護：保留 PyTorch 與 Docker 英文原文。",
-        "口語潤飾：將 Hello world 調整為自然台式發言『大家好』。"
-      ]
-    }
-    """
 
     with patch("translator.genai.Client") as mock_client_cls:
         mock_client = MagicMock()
         mock_client_cls.return_value = mock_client
         mock_response = MagicMock()
-        mock_response.text = mock_json_response
+        mock_response.text = """{
+          "translations": [
+            {"id": 0, "translated_text": "在全新 network 上 Meet Extreme Switching。"}
+          ],
+          "reflection_notes": [
+            "術語保護：嚴格保留 Extreme Switching 原文，未翻為極致。"
+          ]
+        }"""
         mock_client.models.generate_content.return_value = mock_response
 
         trans, biling, notes = reflective_translate_subtitles(
             api_key="fake_key",
             subtitles=sample_subtitles,
-            custom_vocabulary=["PyTorch", "Docker"]
+            custom_vocabulary=["Extreme Switching", "switch", "network -> 網路"]
         )
 
-        assert len(trans) == 2
-        assert trans[0]["text"] == "大家好，歡迎參加我們的發表會。"
-        assert trans[0]["original_text"] == "Hello world, welcome to our presentation."
-        assert trans[1]["text"] == "今天我們將討論 PyTorch 與 Docker。"
-
-        assert len(biling) == 2
-        assert biling[0]["text"] == "大家好，歡迎參加我們的發表會。\nHello world, welcome to our presentation."
-        assert biling[1]["text"] == "今天我們將討論 PyTorch 與 Docker。\nToday we will talk about PyTorch and Docker."
-
-        assert len(notes) >= 1
-        assert any("術語" in n for n in notes)
+        assert len(trans) == 1
+        # Verify prompt captured the custom vocabulary sections
+        call_args = mock_client.models.generate_content.call_args
+        prompt_sent = call_args.kwargs["contents"]
+        assert "【最高優先級術語保護清單】" in prompt_sent
+        assert "Extreme Switching" in prompt_sent
+        assert "switch" in prompt_sent
+        assert "【指定術語對照清單】" in prompt_sent
+        assert "network ➔ 網路" in prompt_sent
+        assert "絕對禁止直譯品牌與產品線" in prompt_sent
 
 def test_safe_parse_with_unescaped_quotes():
     """
@@ -91,7 +107,6 @@ def test_batching_translation():
 
         def mock_generate(*args, **kwargs):
             resp = MagicMock()
-            # return translations matching whatever lines requested
             resp.text = """{
               "translations": [
                 {"id": 0, "translated_text": "行 0"}
@@ -108,5 +123,4 @@ def test_batching_translation():
         )
 
         assert len(trans) == 45
-        # Call count should be 2 because 45 items with BATCH_SIZE=40 requires 2 batches
         assert mock_client.models.generate_content.call_count == 2

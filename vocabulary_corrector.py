@@ -26,7 +26,18 @@ def correct_subtitles_with_vocabulary(
     
     # Prepare compact input representation: [{"id": 0, "text": "..."}]
     compact_lines = [{"id": i, "text": sub["text"]} for i, sub in enumerate(subtitles)]
-    vocab_str = ", ".join(custom_vocabulary)
+    
+    vocab_items = []
+    for item in custom_vocabulary:
+        item = item.strip()
+        if not item:
+            continue
+        m = re.split(r"\s*(?:->|=>|→|:|：|=)\s*", item, maxsplit=1)
+        if len(m) == 2 and m[0] and m[1]:
+            vocab_items.append(f"{m[0]} (標準詞: {m[1]})")
+        else:
+            vocab_items.append(item)
+    vocab_str = ", ".join(vocab_items)
 
     prompt = f"""你是一位專業的字幕校對專家。
 請根據提供的【專有詞彙清單】，仔細比對並校正【字幕內容】中因發音相似或同音誤認的詞彙。
@@ -35,7 +46,7 @@ def correct_subtitles_with_vocabulary(
 {vocab_str}
 
 【規則】：
-1. 僅針對發音相同或相近的專有名詞、品牌名、術語進行校正（例如「安索匹克」校正為「Anthropic」）。
+1. 僅針對發音相同或相近的專有名詞、品牌名、術語進行校正（例如「安索匹克」校正為「Anthropic」；若有指定標準詞，校正為該指定詞彙）。
 2. 切勿修改與專有詞彙無關的日常字詞、語意或語氣。
 3. 嚴格保持原句結構與標點符號。
 4. 若字幕內容包含簡體中文，請一律轉換為繁體中文（台灣標準正體）。

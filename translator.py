@@ -22,6 +22,41 @@ class TranslationBatchResponse(BaseModel):
     reflection_notes: List[str]
 
 
+def parse_custom_vocabulary(vocab_list: Optional[List[str]]) -> Tuple[List[str], Dict[str, str], List[str]]:
+    """
+    Parses custom vocabulary entries into three categories:
+    1. preserved_terms: Plain English terms/brands/models to strictly keep in original form (e.g. 'switch', 'AP', 'Extreme Switching')
+    2. mapping_terms: Mapped terms with target translations (e.g. 'network -> 網路', 'stacking: 堆疊')
+    3. general_terms: Chinese terms or domain phrases for phonetic/contextual alignment
+    """
+    preserved_terms: List[str] = []
+    mapping_terms: Dict[str, str] = {}
+    general_terms: List[str] = []
+
+    if not vocab_list:
+        return preserved_terms, mapping_terms, general_terms
+
+    for item in vocab_list:
+        item = item.strip()
+        if not item:
+            continue
+
+        # Check mapping pattern: "A -> B", "A => B", "A → B", "A : B", "A ： B", "A = B"
+        m = re.split(r"\s*(?:->|=>|→|:|：|=)\s*", item, maxsplit=1)
+        if len(m) == 2 and m[0] and m[1]:
+            src, tgt = m[0].strip(), m[1].strip()
+            mapping_terms[src] = tgt
+        else:
+            # Check if term has English / alphanumeric letters
+            has_ascii_alpha = any(c.isascii() and c.isalpha() for c in item)
+            if has_ascii_alpha:
+                preserved_terms.append(item)
+            else:
+                general_terms.append(item)
+
+    return preserved_terms, mapping_terms, general_terms
+
+
 def _safe_parse_translation_json(raw_text: str) -> Tuple[Dict[int, str], List[str]]:
     """
     Safely parse LLM translation JSON.
@@ -48,7 +83,7 @@ def _safe_parse_translation_json(raw_text: str) -> Tuple[Dict[int, str], List[st
         note_matches = re.findall(r'"([^"\n]{6,120})"', raw_text)
         clean_notes = [
             n for n in note_matches
-            if any(k in n for k in ["術語", "調整", "譯", "潤飾", "習慣", "保留", "口語", "直譯"])
+            if any(k in n for k in ["術語", "調整", "譯", "潤飾", "習慣", "保留", "口語", "直譯", "對照"])
         ]
         if not clean_notes:
             clean_notes = ["已透過容錯解析引擎完成字幕編譯與術語對齊。"]
@@ -84,7 +119,25 @@ def reflective_translate_subtitles(
         return [], [], []
 
     client = genai.Client(api_key=api_key)
-    vocab_str = ", ".join(custom_vocabulary) if custom_vocabulary else "無"
+
+    # Parse custom vocabulary into preserved terms, mapping terms, and general domain terms
+    preserved_terms, mapping_terms, general_terms = parse_custom_vocabulary(custom_vocabulary)
+
+    vocab_sections = []
+    if preserved_terms:
+        term_lines = "\n".join([f"   - {t}" for t in preserved_terms])
+        vocab_sections.append(f"1. 🔒【最高優先級術語保護清單】（譯文中一律維持英文原文與原始大小寫，絕對禁止自行翻譯為中文！）：\n{term_lines}")
+    if mapping_terms:
+        mapping_lines = "\n".join([f"   - {src} ➔ {tgt}" for src, tgt in mapping_terms.items()])
+        vocab_sections.append(f"2. 🎯【指定術語對照清單】（翻譯時必須嚴格採用指定之繁體中文譯法）：\n{mapping_lines}")
+    if general_terms:
+        general_lines = "\n".join([f"   - {t}" for t in general_terms])
+        vocab_sections.append(f"3. 📌【領域專用詞彙與語境備忘】：\n{general_lines}")
+
+    if vocab_sections:
+        vocab_instruction = "\n\n".join(vocab_sections)
+    else:
+        vocab_instruction = "無使用者指定專有詞彙（請遵循一般科技產業與會議之慣用專有名詞規範）。"
 
     total_subtitles = len(subtitles)
     master_trans_map: Dict[int, str] = {}
@@ -102,21 +155,24 @@ def reflective_translate_subtitles(
         prompt = f"""你是一位精通【反思式翻譯（Reflective Translation）】的專業影視與會議字幕編譯專家。
 請將下列【字幕原文】逐句翻譯為道地自然、口語流暢的【{target_language}】。
 
-【專有詞彙與術語清單】：
-{vocab_str}
+【專有詞彙與術語清單（最高優先級約束，不可違背）】：
+{vocab_instruction}
 
 【翻譯與兩階段反思規範】（嚴格遵循 reflective-translation 標準）：
 1. 兩階段處理（內部草稿與自審修潤）：
    - 初譯：忠實傳達語意。
-   - 自審修潤：檢查是否符合台灣習慣用語，依據字幕特性潤飾為自然口語，避免機械式字對字硬翻。
-2. 字幕（SRT）特性約束：
+   - 自審修潤：必須嚴格執行「術語與品牌檢核清單（Term Preservation Checklist）」。檢查譯文是否不慎將保護清單中的英文詞彙翻成了中文？（例如：若清單要求保留 switch 或 Extreme Switching，草稿若誤翻為「交換器」或「極致交換器」，終稿必須強制還原回英文原文！）
+2. 術語保護與品牌規範（Term Preservation - 最高優先級）：
+   - 【絕對禁止直譯品牌與產品線】：嚴禁將公司名稱、品牌名稱、產品型號拆解為普通形容詞進行字面直譯（例如：Extreme 是網通品牌名稱，絕不可譯為「極致」；Apple 是品牌名稱，絕不可譯為「蘋果」）。
+   - 【保護清單詞彙絕對維持原文】：凡上述【最高優先級術語保護清單】中的詞彙（如 switch, AP, Extreme Switching 等），在譯文中一律保持原始英文與大小寫，絕不可自作主張翻譯為中文（不可翻為「交換器」或「存取點」等）。
+   - 【指定對照強制落實】：凡上述【指定術語對照清單】中的詞彙，必須嚴格採用指定之譯名（例如 network 必須譯為「網路」）。
+   - 【通用技術縮寫保護】：常見技術名詞與專用縮寫（如 Google, Anthropic, PyTorch, Docker, API, UI, AI, CLI, SDK 等）亦一律保留原始英文與大小寫。
+3. 字幕（SRT）特性約束：
    - 追求自然口語節奏與螢幕可讀性，每行字數宜在 25~30 字以內，避免難以在螢幕上快速掃讀的冗長子句。
-3. 術語與品牌保護（Term Preservation）：
-   - 品牌名稱、產品名稱、技術名詞、公司名與專用縮寫（如 Google, Anthropic, PyTorch, Docker, API, UI, AI 等）請一律保留原始英文與大小寫，除非上下文強烈需要。
 4. 標點引號防護：
    - 中文對話引述請使用『』或「」，避免在 translated_text 中使用未轉義的雙引號 `"`。
 5. 反思紀錄（Reflection）：
-   - 審視此批字幕翻譯後，提出 1~2 點關鍵的反思筆記（例如：特定專業術語的抉擇理由、口語化語氣調整、或是對原文潛在歧義的處理方式）。
+   - 審視此批字幕翻譯後，提出 1~2 點關鍵的反思筆記（例如：確認哪些專有名詞已嚴格依據清單保留為英文原文、指定對照詞的落實情形、或長句口語化調整理由）。
 
 【請以 JSON 格式嚴格回傳】：
 {{
@@ -124,8 +180,8 @@ def reflective_translate_subtitles(
     {{"id": {batch_start}, "translated_text": "正體中文譯文"}}
   ],
   "reflection_notes": [
-    "術語選擇：保留專有名詞原文",
-    "語氣調整：調整為自然對話句型"
+    "術語保護：依據專有詞彙清單，嚴格保留 switch 與 Extreme Switching 等品牌與專有名詞原文",
+    "語氣調整：調整為自然對話句型並符合字幕長度"
   ]
 }}
 

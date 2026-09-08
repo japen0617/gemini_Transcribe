@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 import logging
@@ -195,11 +196,12 @@ uploaded_file = st.file_uploader(
 col1, col2 = st.columns([1, 1])
 with col1:
     vocab_text = st.text_area(
-        "專有詞彙 (Custom Vocabulary)",
-        placeholder="例如：Anthropic, PyTorch, 永豐金, 大戶投, 抗重力 (以逗號或換行分隔)",
-        help="提供易被音訊辨識錯誤的專業名詞、人名或品牌，系統將由 Gemini 進行同音字精準校對"
+        "專有詞彙與術語清單（同時適用於轉錄校正與反思翻譯）",
+        placeholder="例如：\nswitch, AP, Extreme Switching\nnetwork -> 網路\nstacking -> 堆疊\nAnthropic, PyTorch, 永豐金",
+        help="保留原文：直接輸入英文詞彙（如 switch, AP），翻譯時將強制鎖定保留英文，絕不誤翻為中文。\n指定譯法：可輸入對照格式（如 network -> 網路），翻譯時將嚴格採用此譯名。",
+        height=140
     )
-    custom_vocab = [v.strip() for v in vocab_text.replace("\n", ",").split(",") if v.strip()]
+    custom_vocab = [v.strip() for v in re.split(r"[,，\n]+", vocab_text) if v.strip()]
 
 with col2:
     context_notes = st.text_area(
