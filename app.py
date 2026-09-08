@@ -241,6 +241,7 @@ if start_btn:
                 "raw_subtitles": subtitles,
                 "total_duration": subtitles[-1]["end"] if subtitles else 0.0,
                 "chunk_count": 1,
+                "filename": uploaded_file.name,
                 "source_file": uploaded_file.name
             }
             st.session_state.speaker_aligned = True
@@ -383,9 +384,12 @@ if start_btn:
             "translated_subtitles": translated_subs,
             "bilingual_subtitles": bilingual_subs,
             "reflection_notes": reflection_notes,
+            "mode1_subtitles": getattr(translated_subs, "mode1", translated_subs) if translated_subs else subtitles,
+            "mode2_subtitles": getattr(translated_subs, "mode2", translated_subs) if translated_subs else subtitles,
             "total_duration": total_duration,
             "chunk_count": chunk_count,
-            "filename": input_filename
+            "filename": input_filename,
+            "source_file": input_filename
         }
 
         st.session_state.speaker_aligned = False
@@ -405,9 +409,9 @@ if start_btn:
 # ----------------- Results Display -----------------
 if st.session_state.transcription_results:
     res = st.session_state.transcription_results
-    subtitles = res["subtitles"]
-    total_dur = res["total_duration"]
-    chunk_count = res["chunk_count"]
+    subtitles = res.get("subtitles", [])
+    total_dur = res.get("total_duration", 0.0)
+    chunk_count = res.get("chunk_count", 1)
 
     st.divider()
     st.subheader("📊 轉錄成果與統計")
@@ -536,12 +540,13 @@ if st.session_state.transcription_results:
 
     # Download Buttons
     st.subheader("📥 匯出字幕與逐字稿")
-    base_stem = Path(res["filename"]).stem
+    base_filename = res.get("filename") or res.get("source_file") or "subtitles.srt"
+    base_stem = Path(base_filename).stem
     
     srt_content = generate_srt(active_subtitles)
     vtt_content = generate_vtt(active_subtitles)
     txt_content = generate_txt(active_subtitles)
-    json_content = generate_json_export(active_subtitles, metadata={"filename": res["filename"], "duration": total_dur})
+    json_content = generate_json_export(active_subtitles, metadata={"filename": base_filename, "duration": total_dur})
 
 
     d1, d2, d3, d4 = st.columns(4)
