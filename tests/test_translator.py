@@ -240,6 +240,35 @@ def test_split_translation_proportionally():
     assert reconstructed == trans_text
 
 
+def test_split_translation_zero_empty_and_quote_protection():
+    from translator import split_translation_proportionally
+
+    # Case 1: Short tail cue (0.3s) - must NEVER be empty, snaps to comma
+    cues_tail = [
+        {"start": 14.3, "end": 16.2, "text": "We make switches and we do them", "speaker": "語者 1"},
+        {"start": 16.2, "end": 16.5, "text": "well.", "speaker": "語者 1"}
+    ]
+    trans_tail = "我們製造 switch，而且我們做得很好。"
+    res_tail = split_translation_proportionally(cues_tail, trans_tail)
+    assert len(res_tail) == 2
+    assert res_tail[0]["text"] == "我們製造 switch，"
+    assert res_tail[1]["text"] == "而且我們做得很好。"
+    assert all(len(c["text"]) > 0 for c in res_tail)
+
+    # Case 2: Title in quotes - must NOT be cut in the middle of quotes
+    cues_quote = [
+        {"start": 3.6, "end": 5.3, "text": "We are back for the new welcome", "speaker": "語者 1"},
+        {"start": 5.3, "end": 7.5, "text": "series, Meet Extreme Switching.", "speaker": "語者 1"}
+    ]
+    trans_quote = "我們為全新的歡迎系列節目「Meet Extreme Switching」回來了。"
+    res_quote = split_translation_proportionally(cues_quote, trans_quote)
+    assert len(res_quote) == 2
+    assert res_quote[0]["text"] == "我們為全新的歡迎系列節目"
+    assert res_quote[1]["text"] == "「Meet Extreme Switching」回來了。"
+    assert not res_quote[0]["text"].endswith("「Meet")
+
+
+
 def test_reflow_translation_to_subtitles():
     from translator import reflow_translation_to_subtitles
 

@@ -293,6 +293,32 @@ def merge_subtitles_to_sentences(
     return blocks
 
 
+def _get_quote_spans(text: str) -> List[Tuple[int, int]]:
+    """Finds all quote/bracket spans in text to protect them from being torn across lines."""
+    spans: List[Tuple[int, int]] = []
+    pairs = [("「", "」"), ("《", "》"), ('"', '"'), ("'", "'"), ("“", "”"), ("(", ")"), ("（", "）")]
+    for open_ch, close_ch in pairs:
+        start = 0
+        while True:
+            o_pos = text.find(open_ch, start)
+            if o_pos == -1:
+                break
+            c_pos = text.find(close_ch, o_pos + 1)
+            if c_pos == -1:
+                break
+            spans.append((o_pos, c_pos))
+            start = c_pos + 1
+    return spans
+
+
+def _is_inside_quote(idx: int, spans: List[Tuple[int, int]]) -> bool:
+    """Checks if an index falls strictly inside an open quote/bracket span."""
+    for o, c in spans:
+        if o < idx <= c:
+            return True
+    return False
+
+
 def split_translation_proportionally(
     block_cues: List[Dict[str, Any]],
     translated_text: str
@@ -300,6 +326,12 @@ def split_translation_proportionally(
     """
     Mode 1: Splits a translated sentence block proportionally back across the original
     cues according to their respective durations. Preserves exact line count & timestamps.
+
+    Enhancements:
+    1. Zero-Empty Guarantee: Ensures every cue receives non-empty text (never starves trailing cues).
+    2. Sentence-End Exclusion: Intermediate cues NEVER snap to sentence-ending punctuation (。！？).
+    3. Clause Punctuation Priority: Strongly prefers splitting on commas, semicolons (，、；) to keep clauses natural.
+    4. Quote & Title Protection: Protects titles/quoted terms (「...」, 《...》, "...") from being cut in half.
     """
     if not block_cues:
         return []
@@ -314,30 +346,92 @@ def split_translation_proportionally(
     trans = translated_text.strip()
     total_chars = len(trans)
 
-    results = []
+    results: List[Dict[str, Any]] = []
     curr_char_idx = 0
     num_cues = len(block_cues)
+    quote_spans = _get_quote_spans(trans)
 
     for i, orig_cue in enumerate(block_cues):
         c = dict(orig_cue)
         c["original_text"] = orig_cue.get("text", "")
         if i == num_cues - 1:
             segment = trans[curr_char_idx:].strip()
+            # If for any reason segment is empty, borrow characters from previous cue
+            if not segment and results:
+                prev_text = results[-1]["text"]
+                if len(prev_text) > 4:
+                    borrow_split = max(1, len(prev_text) - 4)
+                    for bp in range(len(prev_text) - 1, max(0, len(prev_text) - 8), -1):
+                        if prev_text[bp] in "，、； ":
+                            borrow_split = bp + 1
+                            break
+                    segment = prev_text[borrow_split:].strip()
+                    results[-1]["text"] = prev_text[:borrow_split].strip()
+                    results[-1]["translated_text"] = results[-1]["text"]
         else:
+            remaining_cues = num_cues - 1 - i
+            if total_chars >= num_cues:
+                max_split = max(curr_char_idx + 1, total_chars - remaining_cues)
+            else:
+                max_split = min(total_chars, curr_char_idx + 1)
+
             cue_dur = max(0.1, orig_cue.get("end", 0.0) - orig_cue.get("start", 0.0))
             ratio = cue_dur / total_duration
             target_count = max(1, round(total_chars * ratio))
-            target_end = min(total_chars - (num_cues - 1 - i), curr_char_idx + target_count)
+            target_end = min(max_split, curr_char_idx + target_count)
 
-            # Snap to punctuation within a search window if available
-            search_start = max(curr_char_idx + 1, target_end - 3)
-            search_end = min(total_chars - (num_cues - 1 - i), target_end + 3)
             best_split = target_end
-            for p_idx in range(search_start, search_end + 1):
-                if p_idx < len(trans) and trans[p_idx] in "，、。； ":
-                    best_split = p_idx + 1
-                    break
+            best_score = float("inf")
 
+            search_start = max(curr_char_idx + 1, target_end - 10)
+            search_end = min(max_split, target_end + 10)
+
+            for p_idx in range(search_start, search_end + 1):
+                # 1. Comma / Semicolon / Pause punctuation (split AFTER p_idx)
+                if p_idx < len(trans) and trans[p_idx] in "，、；;":
+                    cand = p_idx + 1
+                    if curr_char_idx < cand <= max_split:
+                        dist = abs(cand - target_end)
+                        score = dist * 1.0 - 6.0
+                        if _is_inside_quote(cand, quote_spans):
+                            score += 12.0
+                        if score < best_score:
+                            best_score = score
+                            best_split = cand
+
+                # 2. Before Opening Quote / Bracket (split BEFORE p_idx)
+                if p_idx < len(trans) and trans[p_idx] in "「《\"“(":
+                    cand = p_idx
+                    if curr_char_idx < cand <= max_split:
+                        dist = abs(cand - target_end)
+                        score = dist * 1.0 - 5.0
+                        if score < best_score:
+                            best_score = score
+                            best_split = cand
+
+                # 3. Space between words
+                if p_idx < len(trans) and trans[p_idx] == " ":
+                    cand = p_idx + 1
+                    if curr_char_idx < cand <= max_split:
+                        dist = abs(cand - target_end)
+                        score = dist * 1.5
+                        if _is_inside_quote(cand, quote_spans):
+                            score += 15.0  # Heavily penalize breaking inside quoted entity
+                        if score < best_score:
+                            best_score = score
+                            best_split = cand
+
+            # Base target_end evaluation if candidate falls inside quote
+            if best_score == float("inf") or _is_inside_quote(best_split, quote_spans):
+                for o, cl in quote_spans:
+                    if o < target_end <= cl:
+                        if curr_char_idx < o <= max_split and abs(o - target_end) <= 8:
+                            best_split = o
+                        elif curr_char_idx < cl + 1 <= max_split and abs(cl + 1 - target_end) <= 8:
+                            best_split = cl + 1
+                        break
+
+            best_split = max(curr_char_idx + 1, min(max_split, best_split))
             segment = trans[curr_char_idx:best_split].strip()
             curr_char_idx = best_split
 
