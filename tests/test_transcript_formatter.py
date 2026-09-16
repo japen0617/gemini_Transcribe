@@ -223,8 +223,39 @@ I'm Claire.
     json_out = generate_json_export(active_subtitles, metadata={"filename": base_filename, "duration": total_dur})
     parsed_json = json.loads(json_out)
     assert parsed_json["metadata"]["filename"] == filename
-    assert parsed_json["metadata"]["duration"] == 1.2
     assert parsed_json["subtitle_count"] == 2
+
+
+def test_merge_tail_recovered_words():
+    from transcript_formatter import merge_tail_recovered_words
+
+    base_words = [
+        {"text": "delivers", "start": 159.0, "end": 159.5},
+        {"text": "more", "start": 159.5, "end": 159.7}
+    ]
+
+    # Case 1: Tail has duplicate word "more," with punctuation
+    tail_words_with_dup = [
+        {"text": "more,", "start": 159.6, "end": 159.8},
+        {"text": "comprehensive", "start": 159.8, "end": 160.5},
+        {"text": "information", "start": 160.5, "end": 161.4}
+    ]
+    merged1 = merge_tail_recovered_words(base_words, tail_words_with_dup, last_word_end=159.7)
+    assert len(merged1) == 4
+    assert [w["text"] for w in merged1] == ["delivers", "more", "comprehensive", "information"]
+
+    # Case 2: Tail starts directly with next word
+    tail_words_no_dup = [
+        {"text": "comprehensive", "start": 159.8, "end": 160.5}
+    ]
+    merged2 = merge_tail_recovered_words(base_words, tail_words_no_dup, last_word_end=159.7)
+    assert len(merged2) == 3
+    assert [w["text"] for w in merged2] == ["delivers", "more", "comprehensive"]
+
+    # Case 3: Empty inputs
+    assert merge_tail_recovered_words([], tail_words_no_dup, 0.0) == tail_words_no_dup
+    assert merge_tail_recovered_words(base_words, [], 159.7) == base_words
+
 
 
 

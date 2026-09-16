@@ -160,3 +160,91 @@ def split_wav_into_chunks(
         })
         
     return chunks
+
+
+def calculate_audio_rms(
+    wav_path: str,
+    start_sec: float,
+    end_sec: float
+) -> float:
+    """
+    Calculate the Root Mean Square (RMS) amplitude of a WAV audio segment.
+    Used for voice activity detection to distinguish between human speech and silence.
+    Returns float RMS amplitude (silence is typically < 50-100, human voice is typically 1000-5000).
+    """
+    import wave
+    import struct
+
+    if not os.path.exists(wav_path):
+        return 0.0
+
+    duration = max(0.0, end_sec - start_sec)
+    if duration <= 0:
+        return 0.0
+
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            framerate = wf.getframerate()
+            n_frames = wf.getnframes()
+            sampwidth = wf.getsampwidth()
+
+            # Clamp start and count
+            start_frame = max(0, min(int(start_sec * framerate), n_frames))
+            frame_count = max(0, min(int(duration * framerate), n_frames - start_frame))
+
+            if frame_count <= 0:
+                return 0.0
+
+            wf.setpos(start_frame)
+            raw = wf.readframes(frame_count)
+
+            # Support 16-bit PCM (standard 2 bytes)
+            if sampwidth == 2:
+                total_samples = len(raw) // 2
+                if total_samples <= 0:
+                    return 0.0
+                fmt = f"<{total_samples}h"
+                samples = struct.unpack(fmt, raw)
+                sum_sq = sum(s * s for s in samples)
+                return math.sqrt(sum_sq / total_samples)
+            elif sampwidth == 1:
+                samples = [b - 128 for b in raw]
+                if not samples:
+                    return 0.0
+                sum_sq = sum(s * s for s in samples)
+                return math.sqrt(sum_sq / len(samples)) * 256.0
+            else:
+                return 500.0
+    except Exception as e:
+        logger.warning(f"Error calculating audio RMS for {wav_path}: {e}")
+        return 0.0
+
+
+def slice_wav_segment(
+    input_wav: str,
+    start_sec: float,
+    duration_sec: float,
+    output_wav: str
+) -> str:
+    """
+    Extract a subsegment of a WAV file to output_wav using ffmpeg.
+    """
+    ffmpeg_exe = get_ffmpeg_executable()
+    os.makedirs(os.path.dirname(os.path.abspath(output_wav)), exist_ok=True)
+
+    cmd = [
+        ffmpeg_exe,
+        "-y",
+        "-ss", f"{max(0.0, start_sec):.3f}",
+        "-t", f"{duration_sec:.3f}",
+        "-i", input_wav,
+        "-acodec", "pcm_s16le",
+        "-ar", "16000",
+        "-ac", "1",
+        output_wav
+    ]
+    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg slice segment failed: {result.stderr}")
+    return output_wav
+

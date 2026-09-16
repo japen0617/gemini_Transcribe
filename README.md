@@ -69,6 +69,9 @@
     - **JSON**：含字詞層級時間戳（`word_info`）之完整結構化數據。
 13. **隱私與安全**：
     - 轉錄完成後立即於 `finally` 區塊刪除 Google Files API 雲端副本與本機暫存檔案。
+14. **音訊尾部早退自適應補償 (Automatic Tail Truncation Recovery)**：
+    - 針對 Google `gemini-3.5-transcribe` 在連續音訊遇到停頓時產生 Early EOS 誤判導致字幕提早 10~30 秒被截斷（Silent Truncation）的通病。
+    - 系統在每段轉錄後自動檢測尾部空隙（`Gap > 5s`）與音訊能量振幅（`RMS > 300`），若偵測到未轉錄之口白人聲，自動切出尾段進行二次補錄，並於詞級時間戳層級做智慧去重平滑拼接，徹底根除音訊尾部吃字問題！
 
 ---
 
@@ -89,16 +92,17 @@ graph TD
     I --> J[即時清理 Files API 暫存]
     I --> K[transcript_formatter.py]
     K --> L[字詞時間戳解析 & CJK 空格防護]
-    K --> M[語者分離判斷: 開啟/無標籤純淨模式]
-    M --> N[智慧自然斷句與字幕分行]
-    N --> O[vocabulary_corrector.py<br/>Gemini Flash 專有詞彙校正]
-    O --> P[OpenCC 繁體中文轉換 s2twp]
-    P --> Q{外語語音?<br/>反思翻譯}
-    Q -->|是| R[translator.py<br/>兩階段反思翻譯 & 雙語對照]
-    Q -->|否| S[Streamlit Web 介面]
-    R --> S
-    S -->|可選| T[AI 跨段語者對齊與人名推斷]
-    S --> U[匯出 SRT / VTT / TXT / JSON]
+    L --> M[尾部早退自適應檢測 & RMS 人聲補償]
+    M --> N[語者分離判斷: 開啟/無標籤純淨模式]
+    N --> O[智慧自然斷句與字幕分行]
+    O --> P[vocabulary_corrector.py<br/>Gemini Flash 專有詞彙校正]
+    P --> Q[OpenCC 繁體中文轉換 s2twp]
+    Q --> R{外語語音?<br/>反思翻譯}
+    R -->|是| S[translator.py<br/>兩階段反思翻譯 & 雙語對照]
+    R -->|否| T[Streamlit Web 介面]
+    S --> T
+    T -->|可選| U[AI 跨段語者對齊與人名推斷]
+    T --> V[匯出 SRT / VTT / TXT / JSON]
 ```
 
 ---
@@ -111,6 +115,7 @@ graph TD
 | **語者分離無標註** | 缺少 `timestamp_granularities: ["word"]` 時，API 回傳 200 但完全不帶語者代號 | 強制在請求體中帶入 `timestamp_granularities: ["word"]` |
 | **關閉語者分離仍帶標籤** | 若無語者資訊，多數系統會 fallback 強制指派「語者 1」 | 實作純淨模式判斷，關閉語者分離時嚴格過濾所有 `[語者 1]` 標籤 |
 | **專有詞彙與語者互斥** | 在 Interactions API 同時傳入 `custom_vocabulary` 與語者分離會直接報錯 HTTP 400 | 改由兩階段管線處理：取得轉錄結果後，交由 Gemini Flash 進行二次同音詞對齊校正 |
+| **Google 語音模型尾部早退 (Early EOS) 截斷吃字** | 連續音訊遇停頓或片尾音樂時，模型提早發送 EOS 結束符，導致最後 10~30 秒人聲口白整段神秘丟失（Silent Truncation） | 實作**尾部早退自適應補償機制**，自動偵測尾段差距與音量 RMS 能量，若有人聲自動精確切片二次補錄與時間戳平滑去重拼接 |
 | **長字幕翻譯 JSON 報錯** | 翻譯上百句字幕時，LLM 輸出引號未跳脫拋出 `Expecting ',' delimiter` | 採 40 句分批處理 + Pydantic Schema 約束 + Regex 容錯萃取器 |
 | **macOS MIME 型態錯誤** | macOS 內建推斷 WAV 為 `audio/x-wav`，與 API payload 的 `audio/wav` 不符報錯 400 | 上傳時顯式聲明 `audio/wav`，並動態抓取雲端資源 MIME 嚴格對齊傳入 |
 | **切段零頭散段** | 60 分 5 秒若切 30m+30m+5s，尾段浪費配額且辨識差 | 採均分演算法 `ceil(3605/1200) = 4` 段，每段 15 分鐘均勻分配 |
@@ -277,6 +282,10 @@ gemini_Transcribe/
 
 #### Q7：如果我已經有現成的 .srt 或 .vtt 英文字幕，一定要重新上傳音訊轉錄嗎？
 > 完全不需要！您可以直接將 `.srt` 或 `.vtt` 檔案拖入上傳區，系統會自動偵測並切換為「載入現有字幕檔案並準備翻譯」，瞬間載入所有時間戳與文字，直接套用專有詞彙保護與反思式翻譯，既省時又節省轉錄額度。
+
+#### Q8：為什麼影片總時長偵測正確，但最後幾句台詞卻被模型吃掉了？
+> 這是 Google `gemini-3.5-transcribe` 自回歸模型常見的 **Early EOS（提前終止）** 現象。在單段長音訊中，如果講者在特定段落出現語調下降或微幅停頓，解碼器容易誤判語意結束而提早輸出 `<eos>`，拋棄後續的語音。
+> 本專案內建**「尾部早退自適應補償（Automatic Tail Truncation Recovery）」**機制：系統在每段轉錄後會自動比對尾部時間差，若發現差距大於 5 秒且該區間內檢測到人聲能量（RMS > 300），會自動切出尾段進行二次補錄並於時間戳層級做智慧去重平滑拼接，徹底解決音訊結尾吃字問題。
 
 ---
 

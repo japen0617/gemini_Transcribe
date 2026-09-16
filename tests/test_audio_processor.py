@@ -67,3 +67,38 @@ def test_extract_audio_and_duration():
             
         dur = get_audio_duration(output_wav)
         assert abs(dur - 2.0) < 0.2
+
+
+def test_calculate_audio_rms_and_slice():
+    from audio_processor import calculate_audio_rms, slice_wav_segment
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        test_wav = os.path.join(tmpdir, "rms_test.wav")
+        sample_rate = 16000
+        sec1_samples = sample_rate * 1
+        sec2_samples = sample_rate * 1
+
+        with wave.open(test_wav, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            # 1 second of silence (0), 1 second of signal (amplitude 3000)
+            data1 = struct.pack(f"<{sec1_samples}h", *([0] * sec1_samples))
+            data2 = struct.pack(f"<{sec2_samples}h", *([3000] * sec2_samples))
+            wf.writeframes(data1 + data2)
+
+        # Test silence RMS
+        silence_rms = calculate_audio_rms(test_wav, 0.0, 1.0)
+        assert silence_rms < 1.0
+
+        # Test voice RMS
+        voice_rms = calculate_audio_rms(test_wav, 1.0, 2.0)
+        assert abs(voice_rms - 3000.0) < 10.0
+
+        # Test slice
+        slice_out = os.path.join(tmpdir, "slice.wav")
+        slice_wav_segment(test_wav, 1.0, 1.0, slice_out)
+        assert os.path.exists(slice_out)
+        dur = get_audio_duration(slice_out)
+        assert abs(dur - 1.0) < 0.2
+
