@@ -11,11 +11,14 @@ from audio_processor import (
     get_audio_duration,
     extract_audio_to_wav,
     calculate_chunk_plan,
-    split_wav_into_chunks
+    split_wav_into_chunks,
+    calculate_audio_rms,
+    slice_wav_segment
 )
 from gemini_client import GeminiTranscribeClient
 from transcript_formatter import (
     extract_words_from_interaction_response,
+    merge_tail_recovered_words,
     group_words_into_subtitles,
     generate_srt,
     generate_vtt,
@@ -318,6 +321,77 @@ if start_btn:
                 chunk_count=chunk_count,
                 enable_diarization=enable_diarization
             )
+
+            # Automatic Tail Truncation Recovery
+            chunk_duration = chunk_info["duration"]
+            chunk_start_sec = chunk_info["start"]
+            chunk_file_path = chunk_info["file_path"]
+
+            recovery_attempts = 0
+            max_recovery_attempts = 2
+
+            while recovery_attempts < max_recovery_attempts:
+                last_word_end = chunk_words[-1]["end"] if chunk_words else chunk_start_sec
+                chunk_end_sec = chunk_start_sec + chunk_duration
+                gap = chunk_end_sec - last_word_end
+
+                if gap <= 5.0:
+                    break
+
+                # Check audio energy in the gap interval inside chunk file
+                rel_gap_start = max(0.0, last_word_end - chunk_start_sec)
+                rms = calculate_audio_rms(chunk_file_path, rel_gap_start, chunk_duration)
+                logger.info(f"Chunk {idx + 1}: detected tail gap={gap:.2f}s, audio RMS={rms:.1f}")
+
+                if rms <= 300.0:
+                    # Pure silence or low background noise, normal ending
+                    break
+
+                # Voice activity detected in remaining gap! Launch automatic tail recovery
+                recovery_attempts += 1
+                status_box.warning(
+                    f"第 {idx + 1}/{chunk_count} 段：偵測到尾端提早結束（尚餘 {gap:.1f} 秒人聲，RMS={rms:.0f}），正在自動啟動尾部自適應補錄..."
+                )
+
+                retry_rel_start = max(0.0, rel_gap_start - 2.0)
+                retry_duration = chunk_duration - retry_rel_start
+                retry_wav = os.path.join(work_dir, f"recovery_chunk_{idx+1}_try_{recovery_attempts}.wav")
+
+                try:
+                    slice_wav_segment(chunk_file_path, retry_rel_start, retry_duration, retry_wav)
+                    tail_cloud_file = client.upload_file(retry_wav, mime_type="audio/wav")
+                    uploaded_cloud_files.append(tail_cloud_file.name)
+
+                    tail_resp = client.transcribe_audio(
+                        file_uri=tail_cloud_file.uri,
+                        mime_type="audio/wav",
+                        enable_diarization=enable_diarization,
+                        language_codes=selected_language_codes,
+                        progress_callback=lambda msg: status_box.info(f"第 {idx + 1}/{chunk_count} 段補錄：{msg}")
+                    )
+
+                    tail_words, _, _ = extract_words_from_interaction_response(
+                        tail_resp,
+                        chunk_index=idx,
+                        chunk_start_sec=chunk_start_sec + retry_rel_start,
+                        chunk_count=chunk_count,
+                        enable_diarization=enable_diarization
+                    )
+
+                    prev_word_count = len(chunk_words)
+                    chunk_words = merge_tail_recovered_words(chunk_words, tail_words, last_word_end)
+                    recovered_count = len(chunk_words) - prev_word_count
+
+                    if recovered_count > 0:
+                        status_box.success(
+                            f"第 {idx + 1}/{chunk_count} 段：尾部自適應補錄成功！順利挽回 {recovered_count} 個字詞（時間戳延展至 {chunk_words[-1]['end']:.1f} 秒）"
+                        )
+                        logger.info(f"Chunk {idx + 1}: recovered {recovered_count} words, new end={chunk_words[-1]['end']:.2f}s")
+                    break
+                except Exception as rec_err:
+                    logger.warning(f"Tail recovery attempt {recovery_attempts} failed: {rec_err}")
+                    break
+
             all_words.extend(chunk_words)
 
         progress_bar.progress(75)

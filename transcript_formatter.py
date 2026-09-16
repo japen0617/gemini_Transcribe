@@ -153,6 +153,44 @@ def extract_words_from_interaction_response(
 
     return words, fallback_text.strip(), has_speakers
 
+
+def merge_tail_recovered_words(
+    base_words: List[Dict[str, Any]],
+    tail_words: List[Dict[str, Any]],
+    last_word_end: float
+) -> List[Dict[str, Any]]:
+    """
+    Intelligently stitch recovered tail words into base words:
+    - Filters tail words that start at or after (last_word_end - 0.2s).
+    - If the first recovered word text matches the last word text of base_words (case-insensitive & stripped of punctuation),
+      skip the duplicate word.
+    - Returns combined list of words.
+    """
+    if not tail_words:
+        return list(base_words)
+    if not base_words:
+        return list(tail_words)
+
+    clean_punc = lambda s: re.sub(r"[^\w\s]", "", s).strip().lower()
+
+    candidates = [tw for tw in tail_words if tw.get("end", 0.0) > (last_word_end - 0.1)]
+    if not candidates:
+        candidates = [tw for tw in tail_words if tw.get("start", 0.0) >= (last_word_end - 0.2)]
+
+    if not candidates:
+        return list(base_words)
+
+    last_base_text = clean_punc(base_words[-1].get("text", ""))
+    first_cand_text = clean_punc(candidates[0].get("text", ""))
+
+    if last_base_text and first_cand_text and last_base_text == first_cand_text:
+        candidates = candidates[1:]
+
+    combined = list(base_words)
+    combined.extend(candidates)
+    return combined
+
+
 def group_words_into_subtitles(
     words: List[Dict[str, Any]],
     pause_threshold: float = 1.2,
