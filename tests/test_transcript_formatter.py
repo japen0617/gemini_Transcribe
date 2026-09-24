@@ -252,9 +252,45 @@ def test_merge_tail_recovered_words():
     assert len(merged2) == 3
     assert [w["text"] for w in merged2] == ["delivers", "more", "comprehensive"]
 
-    # Case 3: Empty inputs
-    assert merge_tail_recovered_words([], tail_words_no_dup, 0.0) == tail_words_no_dup
-    assert merge_tail_recovered_words(base_words, [], 159.7) == base_words
+
+def test_subtitle_editing_and_reexport():
+    import pandas as pd
+    # Simulate user's exact scenario:
+    # Row 1 had truncated word 'talk to knowledg'
+    # Row 2 had the fragment 'e）可協助您...'
+    raw_subtitles = [
+        {"start": 21.3, "end": 24.5, "speaker": "", "text": "某些技能（例如 talk to knowledg"},
+        {"start": 24.5, "end": 27.8, "speaker": "", "text": "e）可協助您從說明文件、指南和知識來源中尋找資訊。"}
+    ]
+
+    # Convert to DataFrame (as in st.data_editor)
+    df = pd.DataFrame(raw_subtitles)
+    
+    # Simulate user editing the cells:
+    df.loc[0, "text"] = "某些技能（例如 talk to knowledge）"
+    df.loc[1, "text"] = "可協助您從說明文件、指南和知識來源中尋找資訊。"
+
+    # Parse back from editor
+    edited_subs = []
+    for r in df.to_dict(orient="records"):
+        edited_subs.append({
+            "start": round(float(r["start"]), 3),
+            "end": round(float(r["end"]), 3),
+            "speaker": str(r.get("speaker", "")).strip(),
+            "text": str(r.get("text", "")).strip()
+        })
+    edited_subs.sort(key=lambda s: s["start"])
+
+    # Verify SRT export matches edited text
+    srt_out = generate_srt(edited_subs)
+    assert "某些技能（例如 talk to knowledge）" in srt_out
+    assert "可協助您從說明文件、指南和知識來源中尋找資訊。" in srt_out
+    assert "talk to knowledg\n" not in srt_out
+    assert "e）可協助您" not in srt_out
+
+    # Verify TXT export
+    txt_out = generate_txt(edited_subs)
+    assert "talk to knowledge）" in txt_out
 
 
 

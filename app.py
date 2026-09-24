@@ -1,3 +1,5 @@
+import copy
+import html
 import os
 import re
 import shutil
@@ -5,6 +7,7 @@ import tempfile
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
+import pandas as pd
 import streamlit as st
 
 from audio_processor import (
@@ -527,6 +530,9 @@ if st.session_state.transcription_results:
                     st.session_state.transcription_results["subtitles"] = aligned_subs
                     st.session_state.speaker_aligned = True
                     st.session_state.speaker_report = rep
+                    for k in list(st.session_state.transcription_results.keys()):
+                        if k.startswith("original_") or k.startswith("editor_ver_"):
+                            st.session_state.transcription_results.pop(k, None)
                     st.rerun()
 
 
@@ -577,6 +583,9 @@ if st.session_state.transcription_results:
                 st.session_state.transcription_results["mode1_subtitles"] = getattr(t_subs, "mode1", t_subs)
                 st.session_state.transcription_results["mode2_subtitles"] = getattr(t_subs, "mode2", t_subs)
                 st.session_state.transcription_results["subtitles"] = t_subs
+                for k in list(st.session_state.transcription_results.keys()):
+                    if k.startswith("original_") or k.startswith("editor_ver_"):
+                        st.session_state.transcription_results.pop(k, None)
                 st.rerun()
 
     # Reflection Notes Expander
@@ -595,34 +604,134 @@ if st.session_state.transcription_results:
         )
         if sub_mode == "正體中文譯文":
             if strict_line_mode and "mode1_subtitles" in res:
-                active_subtitles = res["mode1_subtitles"]
+                target_key = "mode1_subtitles"
             elif not strict_line_mode and "mode2_subtitles" in res:
-                active_subtitles = res["mode2_subtitles"]
+                target_key = "mode2_subtitles"
             else:
-                active_subtitles = res["translated_subtitles"]
+                target_key = "translated_subtitles"
         elif sub_mode == "雙語對照字幕 (繁體中文 + 原文)":
-            active_subtitles = res["bilingual_subtitles"]
+            target_key = "bilingual_subtitles"
             st.info("💡 雙語對照模式已自動啟用模式 1（1:1 行數與時間戳精確對齊）")
         else:
-            active_subtitles = res.get("raw_subtitles", subtitles)
+            target_key = "raw_subtitles" if "raw_subtitles" in res else "subtitles"
     else:
-        active_subtitles = subtitles
+        target_key = "raw_subtitles" if "raw_subtitles" in res else "subtitles"
 
-    # Subtitle Preview
-    st.subheader("📝 字幕即時預覽")
-    with st.container(height=380):
-        for sub in active_subtitles:
-            spk_label = sub.get("speaker", "").strip()
-            start_fmt = f"{sub['start']:.1f}s"
-            end_fmt = f"{sub['end']:.1f}s"
-            rendered_text = sub["text"].replace("\n", "<br>")
-            spk_badge = f'<span class="speaker-badge">[{spk_label}]</span> ' if spk_label else ""
-            st.markdown(
-                f'<span class="time-badge">[{start_fmt} - {end_fmt}]</span>'
-                f'{spk_badge}'
-                f'{rendered_text}',
-                unsafe_allow_html=True
-            )
+    # Ensure target_key exists in res
+    if target_key not in res:
+        res[target_key] = subtitles
+
+    # Snapshot original if not already recorded
+    orig_key = f"original_{target_key}"
+    if orig_key not in res:
+        res[orig_key] = copy.deepcopy(res[target_key])
+
+    active_subtitles = res[target_key]
+
+    # Subtitle Preview and Interactive Editor Tabs (Option B)
+    st.subheader("📝 字幕預覽與線上編輯")
+    tab_preview, tab_edit = st.tabs(["👁️ 視覺預覽", "✏️ 線上編輯"])
+
+    editor_version = res.get(f"editor_ver_{target_key}", 0)
+    editor_key = f"sub_editor_{target_key}_{editor_version}"
+
+    with tab_edit:
+        ed_col_info, ed_col_btn = st.columns([3, 1])
+        with ed_col_info:
+            st.caption("💡 **編輯說明**：直接雙擊儲存格即可修改字幕文字、微調時間戳或講者。支援新增/刪除行，修改將即時連動「視覺預覽」與下方「匯出下載」。")
+        with ed_col_btn:
+            if st.button("🔄 還原為原始字幕", key=f"btn_reset_{target_key}", use_container_width=True, help="捨棄手動修改，還原至模型原始生成之字幕內容"):
+                if orig_key in res:
+                    res[target_key] = copy.deepcopy(res[orig_key])
+                    res[f"editor_ver_{target_key}"] = editor_version + 1
+                    st.toast("已還原為原始字幕內容！", icon="🔄")
+                    st.rerun()
+
+        df_data = []
+        for s in active_subtitles:
+            df_data.append({
+                "start": float(s.get("start", 0.0)),
+                "end": float(s.get("end", 0.0)),
+                "speaker": str(s.get("speaker", "")).strip(),
+                "text": str(s.get("text", "")).strip()
+            })
+        df = pd.DataFrame(df_data)
+
+        edited_df = st.data_editor(
+            df,
+            key=editor_key,
+            use_container_width=True,
+            height=420,
+            num_rows="dynamic",
+            column_config={
+                "start": st.column_config.NumberColumn(
+                    "開始時間 (s)",
+                    help="字幕開始時間（秒）",
+                    format="%.2f",
+                    step=0.1,
+                    width="small"
+                ),
+                "end": st.column_config.NumberColumn(
+                    "結束時間 (s)",
+                    help="字幕結束時間（秒）",
+                    format="%.2f",
+                    step=0.1,
+                    width="small"
+                ),
+                "speaker": st.column_config.TextColumn(
+                    "講者",
+                    help="說話者標籤（可為空）",
+                    width="small"
+                ),
+                "text": st.column_config.TextColumn(
+                    "字幕文字",
+                    help="雙擊即可直接修改文字內容",
+                    width="large",
+                    required=True
+                )
+            }
+        )
+
+        parsed_subs = []
+        for r in edited_df.to_dict(orient="records"):
+            raw_text = str(r.get("text", "")) if pd.notna(r.get("text")) else ""
+            raw_start = r.get("start")
+            raw_end = r.get("end")
+            if not raw_text.strip() and pd.isna(raw_start) and pd.isna(raw_end):
+                continue
+            s_val = round(float(raw_start if pd.notna(raw_start) else 0.0), 3)
+            e_val = round(float(raw_end if pd.notna(raw_end) else s_val + 1.0), 3)
+            spk_val = str(r.get("speaker", "")).strip() if pd.notna(r.get("speaker")) else ""
+            parsed_subs.append({
+                "start": s_val,
+                "end": e_val,
+                "speaker": spk_val,
+                "text": raw_text.strip()
+            })
+
+        parsed_subs.sort(key=lambda s: s["start"])
+
+        if parsed_subs != active_subtitles:
+            res[target_key] = parsed_subs
+            active_subtitles = parsed_subs
+
+    with tab_preview:
+        with st.container(height=420):
+            if not active_subtitles:
+                st.info("尚無字幕內容可預覽。")
+            else:
+                for sub in active_subtitles:
+                    spk_label = sub.get("speaker", "").strip()
+                    start_fmt = f"{sub['start']:.1f}s"
+                    end_fmt = f"{sub['end']:.1f}s"
+                    safe_text = html.escape(sub["text"]).replace("\n", "<br>")
+                    spk_badge = f'<span class="speaker-badge">[{spk_label}]</span> ' if spk_label else ""
+                    st.markdown(
+                        f'<span class="time-badge">[{start_fmt} - {end_fmt}]</span>'
+                        f'{spk_badge}'
+                        f'{safe_text}',
+                        unsafe_allow_html=True
+                    )
 
     # Download Buttons
     st.subheader("📥 匯出字幕與逐字稿")

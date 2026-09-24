@@ -72,6 +72,11 @@
 14. **音訊尾部早退自適應補償 (Automatic Tail Truncation Recovery)**：
     - 針對 Google `gemini-3.5-transcribe` 在連續音訊遇到停頓時產生 Early EOS 誤判導致字幕提早 10~30 秒被截斷（Silent Truncation）的通病。
     - 系統在每段轉錄後自動檢測尾部空隙（`Gap > 5s`）與音訊能量振幅（`RMS > 300`），若偵測到未轉錄之口白人聲，自動切出尾段進行二次補錄，並於詞級時間戳層級做智慧去重平滑拼接，徹底根除音訊尾部吃字問題！
+15. **雙分頁字幕即時預覽與線上編輯 (Dual-Tab Live Preview & In-Place Editor)**：
+    - **分頁 1（👁️ 視覺預覽）**：維持標準影視級時間徽章與語者標籤排版，提供高對比度且舒適的閱讀環境。
+    - **分頁 2（✏️ 線上編輯）**：內建互動式表格編輯器（`st.data_editor`），支援直接雙擊修改字幕文字、調整時間戳或講者標籤，亦可動態新增/刪除行。
+    - **全端即時連動**：任何文字修改將即時同步至視覺預覽與下方的 SRT / VTT / TXT / JSON 匯出按鈕，無需依賴外部文字編輯器。
+    - **安全防呆還原**：提供「🔄 還原此模式之原始字幕」按鈕，編輯誤刪隨時可一鍵還原至原始生成內容。
 
 ---
 
@@ -88,7 +93,7 @@ graph TD
     E --> G[gemini_client.py]
     F --> G
     G --> H[Google Files API 暫存上傳]
-    H --> I[Interactions API 批次轉錄<br/>gemini-3.5-transcribe]
+    G --> I[Interactions API 批次轉錄<br/>gemini-3.5-transcribe]
     I --> J[即時清理 Files API 暫存]
     I --> K[transcript_formatter.py]
     K --> L[字詞時間戳解析 & CJK 空格防護]
@@ -102,7 +107,8 @@ graph TD
     R -->|否| T[Streamlit Web 介面]
     S --> T
     T -->|可選| U[AI 跨段語者對齊與人名推斷]
-    T --> V[匯出 SRT / VTT / TXT / JSON]
+    T --> W[雙分頁視覺預覽 & ✏️ 線上編輯表格]
+    W --> V[匯出 SRT / VTT / TXT / JSON]
 ```
 
 ---
