@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import logging
 from pathlib import Path
 from dotenv import load_dotenv
@@ -248,7 +249,8 @@ if start_btn:
                 "total_duration": subtitles[-1]["end"] if subtitles else 0.0,
                 "chunk_count": 1,
                 "filename": uploaded_file.name,
-                "source_file": uploaded_file.name
+                "source_file": uploaded_file.name,
+                "batch_id": int(time.time())
             }
             st.session_state.speaker_aligned = True
             st.session_state.speaker_report = None
@@ -469,7 +471,8 @@ if start_btn:
             "total_duration": total_duration,
             "chunk_count": chunk_count,
             "filename": input_filename,
-            "source_file": input_filename
+            "source_file": input_filename,
+            "batch_id": int(time.time())
         }
 
         st.session_state.speaker_aligned = False
@@ -528,6 +531,9 @@ if st.session_state.transcription_results:
                         aligned_subs = convert_subtitles_script(aligned_subs, mode=selected_script_mode)
 
                     st.session_state.transcription_results["subtitles"] = aligned_subs
+                    if "raw_subtitles" in st.session_state.transcription_results:
+                        st.session_state.transcription_results["raw_subtitles"] = aligned_subs
+                    st.session_state.transcription_results["batch_id"] = int(time.time())
                     st.session_state.speaker_aligned = True
                     st.session_state.speaker_report = rep
                     for k in list(st.session_state.transcription_results.keys()):
@@ -583,6 +589,7 @@ if st.session_state.transcription_results:
                 st.session_state.transcription_results["mode1_subtitles"] = getattr(t_subs, "mode1", t_subs)
                 st.session_state.transcription_results["mode2_subtitles"] = getattr(t_subs, "mode2", t_subs)
                 st.session_state.transcription_results["subtitles"] = t_subs
+                st.session_state.transcription_results["batch_id"] = int(time.time())
                 for k in list(st.session_state.transcription_results.keys()):
                     if k.startswith("original_") or k.startswith("editor_ver_"):
                         st.session_state.transcription_results.pop(k, None)
@@ -632,8 +639,9 @@ if st.session_state.transcription_results:
     st.subheader("📝 字幕預覽與線上編輯")
     tab_preview, tab_edit = st.tabs(["👁️ 視覺預覽", "✏️ 線上編輯"])
 
+    batch_id = res.get("batch_id", 0)
     editor_version = res.get(f"editor_ver_{target_key}", 0)
-    editor_key = f"sub_editor_{target_key}_{editor_version}"
+    editor_key = f"sub_editor_{target_key}_{batch_id}_{editor_version}"
 
     with tab_edit:
         ed_col_info, ed_col_btn = st.columns([3, 1])
@@ -644,6 +652,9 @@ if st.session_state.transcription_results:
                 if orig_key in res:
                     res[target_key] = copy.deepcopy(res[orig_key])
                     res[f"editor_ver_{target_key}"] = editor_version + 1
+                    if target_key in ("raw_subtitles", "subtitles"):
+                        res["raw_subtitles"] = copy.deepcopy(res[orig_key])
+                        res["subtitles"] = copy.deepcopy(res[orig_key])
                     st.toast("已還原為原始字幕內容！", icon="🔄")
                     st.rerun()
 
@@ -714,6 +725,12 @@ if st.session_state.transcription_results:
         if parsed_subs != active_subtitles:
             res[target_key] = parsed_subs
             active_subtitles = parsed_subs
+            # Lightweight key sync across res
+            if target_key in ("raw_subtitles", "subtitles"):
+                res["raw_subtitles"] = parsed_subs
+                res["subtitles"] = parsed_subs
+            else:
+                res["subtitles"] = parsed_subs
 
     with tab_preview:
         with st.container(height=420):
@@ -725,7 +742,8 @@ if st.session_state.transcription_results:
                     start_fmt = f"{sub['start']:.1f}s"
                     end_fmt = f"{sub['end']:.1f}s"
                     safe_text = html.escape(sub["text"]).replace("\n", "<br>")
-                    spk_badge = f'<span class="speaker-badge">[{spk_label}]</span> ' if spk_label else ""
+                    safe_spk = html.escape(spk_label)
+                    spk_badge = f'<span class="speaker-badge">[{safe_spk}]</span> ' if safe_spk else ""
                     st.markdown(
                         f'<span class="time-badge">[{start_fmt} - {end_fmt}]</span>'
                         f'{spk_badge}'
